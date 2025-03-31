@@ -1,69 +1,90 @@
-import math
-import mindtorch as torch
-from .optimizer import Optimizer
+"""adam"""
+# pylint: disable=unneeded-not, use-dict-literal
+# mypy: allow-untyped-defs
+from typing import Tuple, Union
+
+import mindtorch
+from mindtorch import Tensor
+from .. import ops
+from .optimizer import (
+    _get_scalar_dtype,
+    Optimizer,
+    ParamsT,
+)
+
+__all__ = ["Adam"]
+
 
 
 class Adam(Optimizer):
-    """Implements Adam algorithm.
-
-    It has been proposed in `Adam: A Method for Stochastic Optimization`_.
-
-    Arguments:
-        params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups
-        lr (float, optional): learning rate (default: 1e-3)
-        betas (Tuple[float, float], optional): coefficients used for computing
-            running averages of gradient and its square (default: (0.9, 0.999))
-        eps (float, optional): term added to the denominator to improve
-            numerical stability (default: 1e-8)
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
-            algorithm from the paper `On the Convergence of Adam and Beyond`_
-
-    .. _Adam\: A Method for Stochastic Optimization:
-        https://arxiv.org/abs/1412.6980
-    .. _On the Convergence of Adam and Beyond:
-        https://openreview.net/forum?id=ryQu7f-RZ
-    """
-
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False):
+    def __init__(
+        self,
+        params: ParamsT,
+        lr: Union[float, Tensor] = 1e-3,
+        betas: Tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
+        weight_decay: float = 0,
+        amsgrad: bool = False,
+        *,
+        maximize: bool = False,
+    ):
         if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
+            raise ValueError(f"Invalid learning rate: {lr}")
         if not 0.0 <= eps:
-            raise ValueError("Invalid epsilon value: {}".format(eps))
+            raise ValueError(f"Invalid epsilon value: {eps}")
         if not 0.0 <= betas[0] < 1.0:
-            raise ValueError("Invalid beta parameter at index 0: {}".format(betas[0]))
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
         if not 0.0 <= betas[1] < 1.0:
-            raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
-        defaults = dict(lr=lr, betas=betas, eps=eps,
-                        weight_decay=weight_decay, amsgrad=amsgrad)
-        super(Adam, self).__init__(params, defaults)
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+
+        defaults = dict(
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            amsgrad=amsgrad,
+            maximize=maximize,
+        )
+        super().__init__(params, defaults)
+
 
     def __setstate__(self, state):
-        super(Adam, self).__setstate__(state)
+        super().__setstate__(state)
         for group in self.param_groups:
-            group.setdefault('amsgrad', False)
+            group.setdefault("amsgrad", False)
+            group.setdefault("maximize", False)
+            fused = group.setdefault("fused", None)
+            for p in group["params"]:
+                p_state = self.state.get(p, [])
+                if len(p_state) != 0 and not ops.is_tensor(p_state["step"]):
+                    step_val = float(p_state["step"])
+                    p_state["step"] = (
+                        mindtorch.tensor(
+                            step_val,
+                            dtype=_get_scalar_dtype(is_fused=fused),
+                        )
+                        if group["capturable"] or group["fused"]
+                        else mindtorch.tensor(step_val, dtype=_get_scalar_dtype())
+                    )
 
-    def step(self, closure=None):
-        """Performs a single optimization step.
+    def step(self, grads=None):
+        """Perform a single optimization step.
 
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
+        Args:
+            closure (Callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+
         loss = None
-        if closure is not None:
-            loss = closure()
 
         for group in self.param_groups:
+            amsgrad = group['amsgrad']
+            maximize = group["maximize"]
+
             for p in group['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad
-                # if grad.is_sparse:
-                #     raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
-                amsgrad = group['amsgrad']
+                grad = p.grad if not maximize else -p.grad
 
                 state = self.state[p]
 
@@ -71,12 +92,12 @@ class Adam(Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                     # Exponential moving average of gradient values
-                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg'] = ops.zeros_like(p)
                     # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = ops.zeros_like(p)
                     if amsgrad:
                         # Maintains max of all exp. moving avg. of sq. grad. values
-                        state['max_exp_avg_sq'] = torch.zeros_like(p)
+                        state['max_exp_avg_sq'] = ops.zeros_like(p)
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
                 if amsgrad:
@@ -86,14 +107,13 @@ class Adam(Optimizer):
                 state['step'] += 1
 
                 if group['weight_decay'] != 0:
-                    # grad = grad.add(p, alpha=group['weight_decay'])
-                    grad.data = torch._operations.fused_add_mul(grad.data, p.data, group['weight_decay'])
+                    grad = grad.add(p, alpha=group['weight_decay'])
                 # # Decay the first and second moment running average coefficient
                 # exp_avg.mul_(beta1).add_(grad, 1 - beta1)
                 # exp_avg_sq.mul_(beta2).addcmul_(grad, grad, 1 - beta2)
                 # if amsgrad:
                 #     # Maintains the maximum of all 2nd moment running avg. till now
-                #     torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
+                #     mindtorch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
                 #     # Use the max. for normalizing running avg. of gradient
                 #     denom = max_exp_avg_sq.sqrt().add_(group['eps'])
                 # else:
@@ -108,10 +128,8 @@ class Adam(Optimizer):
                 beta1_power = beta1 ** state['step']
                 beta2_power = beta2 ** state['step']
                 if amsgrad:
-                    torch._operations.raw_adam_amsgrad(p.data, exp_avg.data, exp_avg_sq.data, max_exp_avg_sq.data,
-                                                       beta1_power, beta2_power, group['lr'], beta1, beta2, group['eps'], grad.data)
+                    ops.optim.raw_adam_amsgrad(p, exp_avg, exp_avg_sq, max_exp_avg_sq,
+                                                       beta1_power, beta2_power, group['lr'], beta1, beta2, group['eps'], grad)
                 else:
-                    torch._operations.raw_adam(p.data, exp_avg.data, exp_avg_sq.data, beta1_power, beta2_power,
-                                               group['lr'], beta1, beta2, group['eps'], grad.data)
-
-        return loss
+                    ops.optim.raw_adam(p, exp_avg, exp_avg_sq, beta1_power, beta2_power,
+                                               group['lr'], beta1, beta2, group['eps'], grad)

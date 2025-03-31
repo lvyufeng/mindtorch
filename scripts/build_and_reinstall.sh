@@ -1,3 +1,7 @@
+pip uninstall torch torch_npu torchvision -y
+
+rm -rf ./build
+rm -rf ./dist
 python setup.py bdist_wheel
-rm -rf mindtorch.egg-info
+rm -rf *.egg-info
 pip uninstall mindtorch -y && pip install dist/*.whl

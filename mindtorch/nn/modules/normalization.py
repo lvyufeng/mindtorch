@@ -1,71 +1,10 @@
-import mindtorch as torch
+"""normalization"""
 import numbers
-from mindtorch.nn.parameter import Parameter
+from ..parameter import Parameter
 from .module import Module
-# from .batchnorm import _BatchNorm
-from .. import functional as F
+from ..functional import group_norm, layer_norm
 from .. import init
-
-
-class LocalResponseNorm(Module):
-    r"""Applies local response normalization over an input signal composed
-    of several input planes, where channels occupy the second dimension.
-    Applies normalization across channels.
-
-    .. math::
-        b_{c} = a_{c}\left(k + \frac{\alpha}{n}
-        \sum_{c'=\max(0, c-n/2)}^{\min(N-1,c+n/2)}a_{c'}^2\right)^{-\beta}
-
-    Args:
-        size: amount of neighbouring channels used for normalization
-        alpha: multiplicative factor. Default: 0.0001
-        beta: exponent. Default: 0.75
-        k: additive factor. Default: 1
-
-    Shape:
-        - Input: :math:`(N, C, ...)`
-        - Output: :math:`(N, C, ...)` (same shape as input)
-
-    Examples::
-
-        >>> lrn = nn.LocalResponseNorm(2)
-        >>> signal_2d = torch.randn(32, 5, 24, 24)
-        >>> signal_4d = torch.randn(16, 5, 7, 7, 7, 7)
-        >>> output_2d = lrn(signal_2d)
-        >>> output_4d = lrn(signal_4d)
-
-    """
-
-    def __init__(self, size, alpha=1e-4, beta=0.75, k=1):
-        super(LocalResponseNorm, self).__init__()
-        self.size = size
-        self.alpha = alpha
-        self.beta = beta
-        self.k = k
-
-    def forward(self, input):
-        return F.local_response_norm(input, self.size, self.alpha, self.beta,
-                                     self.k)
-
-    def extra_repr(self):
-        return '{size}, alpha={alpha}, beta={beta}, k={k}'.format(**self.__dict__)
-
-
-class CrossMapLRN2d(Module):
-
-    def __init__(self, size, alpha=1e-4, beta=0.75, k=1):
-        super(CrossMapLRN2d, self).__init__()
-        self.size = size
-        self.alpha = alpha
-        self.beta = beta
-        self.k = k
-
-    def forward(self, input):
-        return self._backend.CrossMapLRN2d(self.size, self.alpha, self.beta,
-                                           self.k)(input)
-
-    def extra_repr(self):
-        return '{size}, alpha={alpha}, beta={beta}, k={k}'.format(**self.__dict__)
+from ... import ops
 
 
 class LayerNorm(Module):
@@ -91,7 +30,7 @@ class LayerNorm(Module):
     evaluation modes.
 
     Args:
-        normalized_shape (int or list or torch.Size): input shape from an expected input
+        normalized_shape (int or list or mindtorch.Size): input shape from an expected input
             of size
 
             .. math::
@@ -110,7 +49,7 @@ class LayerNorm(Module):
 
     Examples::
 
-        >>> input = torch.randn(20, 5, 10, 10)
+        >>> input = mindtorch.randn(20, 5, 10, 10)
         >>> # With Learnable Parameters
         >>> m = nn.LayerNorm(input.size()[1:])
         >>> # Without Learnable Parameters
@@ -124,7 +63,8 @@ class LayerNorm(Module):
 
     .. _`Layer Normalization`: https://arxiv.org/abs/1607.06450
     """
-    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, bias: bool = True,dtype=None):
+        factory_kwargs = {'dtype': dtype}
         super(LayerNorm, self).__init__()
         if isinstance(normalized_shape, numbers.Integral):
             normalized_shape = (normalized_shape,)
@@ -132,21 +72,25 @@ class LayerNorm(Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if self.elementwise_affine:
-            self.weight = Parameter(torch.Tensor(*normalized_shape))
-            self.bias = Parameter(torch.Tensor(*normalized_shape))
+            self.weight = Parameter(ops.empty(self.normalized_shape, **factory_kwargs))
+            if bias:
+                self.bias = Parameter(ops.empty(self.normalized_shape, **factory_kwargs))
+            else:
+                self.register_parameter('bias', None)
         else:
             self.register_parameter('weight', None)
             self.register_parameter('bias', None)
+
         self.reset_parameters()
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
         if self.elementwise_affine:
             init.ones_(self.weight)
-            init.zeros_(self.bias)
+            if self.bias is not None:
+                init.zeros_(self.bias)
 
     def forward(self, input):
-        return F.layer_norm(
-            input, self.normalized_shape, self.weight, self.bias, self.eps)
+        return layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
 
     def extra_repr(self):
         return '{normalized_shape}, eps={eps}, ' \
@@ -182,7 +126,7 @@ class GroupNorm(Module):
 
     Examples::
 
-        >>> input = torch.randn(20, 6, 10, 10)
+        >>> input = mindtorch.randn(20, 6, 10, 10)
         >>> # Separate 6 channels into 3 groups
         >>> m = nn.GroupNorm(3, 6)
         >>> # Separate 6 channels into 6 groups (equivalent with InstanceNorm)
@@ -194,28 +138,30 @@ class GroupNorm(Module):
 
     .. _`Group Normalization`: https://arxiv.org/abs/1803.08494
     """
-    def __init__(self, num_groups, num_channels, eps=1e-5, affine=True):
+    def __init__(self, num_groups, num_channels, eps=1e-5, affine=True, dtype=None):
+        factory_kwargs = {'dtype': dtype}
         super(GroupNorm, self).__init__()
         self.num_groups = num_groups
         self.num_channels = num_channels
         self.eps = eps
         self.affine = affine
         if self.affine:
-            self.weight = Parameter(torch.Tensor(num_channels))
-            self.bias = Parameter(torch.Tensor(num_channels))
+            self.weight = Parameter(ops.empty(num_channels, **factory_kwargs))
+            self.bias = Parameter(ops.empty(num_channels, **factory_kwargs))
         else:
             self.register_parameter('weight', None)
             self.register_parameter('bias', None)
+
         self.reset_parameters()
 
-    def reset_parameters(self):
-        if self.affine:
-            self.weight.data.fill_(1)
-            self.bias.data.zero_()
-
     def forward(self, input):
-        return F.group_norm(
-            input, self.num_groups, self.weight, self.bias, self.eps)
+        return group_norm(input, self.num_groups, self.weight, self.bias, self.eps)
+
+
+    def reset_parameters(self) -> None:
+        if self.affine:
+            init.ones_(self.weight)
+            init.zeros_(self.bias)
 
     def extra_repr(self):
         return '{num_groups}, {num_channels}, eps={eps}, ' \

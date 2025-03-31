@@ -1,10 +1,12 @@
+"""linear"""
+from typing import Any
 import math
-
-import mindtorch as torch
-from mindtorch.nn.parameter import Parameter
-from .. import functional as F
+from mindtorch import Tensor
+from ..parameter import Parameter
 from .module import Module
 from .. import init
+from .. import functional as F
+from ... import ops
 
 class Linear(Module):
     r"""Applies a linear transformation to the incoming data: :math:`y = Ax + b`
@@ -27,22 +29,22 @@ class Linear(Module):
     Examples::
 
         >>> m = nn.Linear(20, 30)
-        >>> input = autograd.Variable(torch.randn(128, 20))
+        >>> input = autograd.Variable(mindtorch.randn(128, 20))
         >>> output = m(input)
         >>> print(output.size())
     """
 
-    def __init__(self, in_features, out_features, bias=True,
-                 device=None, dtype=None) -> None:
-        factory_kwargs = {'device': device, 'dtype': dtype}
+    def __init__(self, in_features, out_features, bias=True, dtype=None) -> None:
+        factory_kwargs = {'dtype': dtype}
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        self.weight = Parameter(ops.empty((out_features, in_features), **factory_kwargs))
         if bias:
-            self.bias = Parameter(torch.empty(out_features, **factory_kwargs))
+            self.bias = Parameter(ops.empty(out_features, **factory_kwargs))
         else:
             self.register_parameter('bias', None)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -64,58 +66,29 @@ class Linear(Module):
             + str(self.out_features) + ')'
 
 
-class Bilinear(Module):
-    r"""Applies a bilinear transformation to the incoming data:
-    :math:`y = x_1 * A * x_2 + b`
+class Identity(Module):
+    r"""A placeholder identity operator that is argument-insensitive.
 
     Args:
-        in1_features: size of each first input sample
-        in2_features: size of each second input sample
-        out_features: size of each output sample
-        bias: If set to False, the layer will not learn an additive bias.
-            Default: True
+        args: any argument (unused)
+        kwargs: any keyword argument (unused)
 
     Shape:
-        - Input: :math:`(N, in1\_features)`, :math:`(N, in2\_features)`
-        - Output: :math:`(N, out\_features)`
-
-    Attributes:
-        weight: the learnable weights of the module of shape
-            (out_features x in1_features x in2_features)
-        bias:   the learnable bias of the module of shape (out_features)
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(*)`, same shape as the input.
 
     Examples::
 
-        >>> m = nn.Bilinear(20, 30, 40)
-        >>> input1 = autograd.Variable(torch.randn(128, 20))
-        >>> input1 = autograd.Variable(torch.randn(128, 30))
-        >>> output = m(input1, input2)
+        >>> m = nn.Identity(54, unused_argument1=0.1, unused_argument2=False)
+        >>> input = mindtorch.randn(128, 20)
+        >>> output = m(input)
         >>> print(output.size())
+        mindtorch.Size([128, 20])
+
     """
 
-    def __init__(self, in1_features, in2_features, out_features, bias=True):
-        super(Bilinear, self).__init__()
-        self.in1_features = in1_features
-        self.in2_features = in2_features
-        self.out_features = out_features
-        self.weight = Parameter(torch.Tensor(out_features, in1_features, in2_features))
-        if bias:
-            self.bias = Parameter(torch.Tensor(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.reset_parameters()
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
 
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.weight.size(1))
-        self.weight.data.uniform_(-stdv, stdv)
-        if self.bias is not None:
-            self.bias.data.uniform_(-stdv, stdv)
-
-    def forward(self, input1, input2):
-        return F.bilinear(input1, input2, self.weight, self.bias)
-
-    def __repr__(self):
-        return self.__class__.__name__ + ' (' \
-            + 'in1_features=' + str(self.in1_features) \
-            + ', in2_features=' + str(self.in2_features) \
-            + ', out_features=' + str(self.out_features) + ')'
+    def forward(self, input: Tensor) -> Tensor:
+        return input

@@ -1,84 +1,135 @@
-from dataclasses import dataclass
-from typing import Tuple, Any, Optional, Type, Sequence
-import weakref
-from mindtorch import Tensor
-from mindtorch.config import Config
+"""functional autograd"""
+from collections.abc import Generator
 
-def wrap_tuple(x):  # type: ignore
-    "Turn a possible value into a tuple"
-    if isinstance(x, tuple):
-        return x
-    return (x,)
+import mindspore
+from mindspore.ops.composite import GradOperation
+from mindspore.ops import stop_gradient
+from mindspore.common.api import _pynative_executor
+from ..configs import GENERATOR_SEED
+from mindspore._c_expression import Cell_
+from .grad_mode import no_grad
 
-@dataclass(unsafe_hash=True)
-class Context:
-    """
-    Context class is used by `Function` to store information during the forward pass.
-    """
+import mindtorch
 
-    no_grad: bool = False
-    saved_values: Tuple[Any, ...] = ()
+grad_ = GradOperation(False, True, False)
+grad_sens_ = GradOperation(False, True, True)
+grad_input_sens_ = GradOperation(True, False, True)
 
-    def save_for_backward(self, *values: Any) -> None:
-        "Store the given `values` if they need to be used during backpropagation."
-        if self.no_grad:
-            return
-        self.saved_values = values
+def value_and_grad(fn, params_or_argnums, has_aux=False, attach_grads=True):
+    use_argnums = False
+    if isinstance(params_or_argnums, Generator):
+        params_or_argnums = tuple(params_or_argnums)
 
-    @property
-    def saved_tensors(self) -> Tuple[Any, ...]:
-        return self.saved_values
+    if isinstance(params_or_argnums[0], int):
+        use_argnums = True
 
-# Constructors
-class Function:
+    def fn_aux(*args):
+        outputs = fn(*args)
+        no_grad_outputs = ()
+        for out in outputs[1:]:
+            no_grad_outputs += (stop_gradient(out),)
+        return outputs[0], no_grad_outputs
+
+    if has_aux:
+        fn_ = fn_aux
+    else:
+        fn_ = fn
+
+    def value_and_grad_f(*args, **kwargs):
+        _pynative_executor.set_grad_flag(True)
+        _pynative_executor.new_graph(fn, *args, **kwargs)
+        values = fn_(*args, **kwargs)
+        _pynative_executor.end_graph(fn, values, *args, **kwargs)
+
+        run_args = args
+        if kwargs:
+            run_args = args + tuple(kwargs.values())
+
+        if GENERATOR_SEED:
+            grads = _pynative_executor.grad(fn_, grad_, params_or_argnums, None, *run_args)
+            # grads = grad_(fn_, params)(*args, *params)
+        else:
+            _pynative_executor.grad(fn_, grad_, params_or_argnums, None, *run_args)
+            grads = _pynative_executor() # pylint: disable=not-callable
+        grads = tuple(mindspore.Tensor(grad) for grad in grads)
+        if attach_grads:
+            for param, grad in zip(params_or_argnums, grads):
+                if param.grad is None:
+                    param.grad = grad
+                else:
+                    param.grad += grad
+            return values
+        return values, grads
+    return value_and_grad_f
+
+def grad(fn, params_or_argnums=None, has_aux=False):
+    value_and_grad_f = value_and_grad(fn, params_or_argnums, has_aux)
+    def grad_f(*args):
+        _, g = value_and_grad_f(*args)
+        return g
+    return grad_f
+
+def vjp(fn, *inputs):
+    grad_ = grad_input_sens_
+
+    _pynative_executor.set_grad_flag(True)
+    _pynative_executor.new_graph(fn, *inputs)
+    values = fn(*inputs)
+    _pynative_executor.end_graph(fn, values, *inputs)
+
+    def wrap_container(*v):
+        sens = v
+        if len(v) == 1:
+            sens = v[0]
+
+        grads = _pynative_executor.grad(fn, grad_, None, None, *inputs, sens)
+        return grads
+    return values, wrap_container
+
+
+class Function(Cell_):
+    def __init__(self):
+        super().__init__(str(self.__class__)[8:-2])
+        self.saved_tensors = []
+        self.used_bprop_inputs = []
+
+    def save_for_backward(self, *args):
+        if isinstance(args, tuple):
+            self.saved_tensors.extend(list(args))
+        else:
+            self.saved_tensors.append(args)
+
+    @staticmethod
+    def forward(ctx, *args, **kwargs):
+        raise NotImplementedError
+
+    @staticmethod
+    def backward(ctx, *args, **kwargs):
+        raise NotImplementedError
+
+    def construct(self, *args, **kwargs):
+        self.needs_input_grad = [input_.requires_grad if hasattr(input_, 'requires_grad') else False for input_ in args]
+        args = (self,) + args
+        outputs = self.forward(*args, **kwargs)
+        self.device = outputs[0].device if isinstance(outputs, tuple) else outputs.device
+        return outputs
+
+    def bprop(self, *args, **kwargs):
+        grads = args[-1]
+        if isinstance(grads, tuple):
+            grads = (mindtorch.Tensor(grad.stub, device=self.device) for grad in grads)
+        else:
+            grads = mindtorch.Tensor(grads.stub, device=self.device)
+        args = (grads,)
+        args = (self,) + args
+        return self.backward(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        with no_grad():
+            output = self.construct(*args, **kwargs)
+        _pynative_executor.call_custom_bprop(self, output, *args, **kwargs)
+        return output
+
     @classmethod
-    def _backward(cls, ctx: Context, *grad_out: Tensor) -> Tuple[Tensor, ...]:
-        return wrap_tuple(cls.backward(ctx, *grad_out))  # type: ignore
-
-    @classmethod
-    def _forward(cls, ctx: Context, *inps: Tensor, **kwargs) -> Tensor:
-        return wrap_tuple(cls.forward(ctx, *inps, **kwargs))  # type: ignore
-
-    @classmethod
-    def apply(cls, *vals: Tensor, **kwargs):
-        requires_grad = kwargs.pop('requires_grad', True) # for creation ops
-
-        raw_vals = [x.data for x in vals]
-
-        requires_grad = any([x.requires_grad for x in vals]) \
-            and Config.enable_backprop and requires_grad  # whether inputs requires grad
-
-        # Create the context.
-        ctx = Context(not requires_grad)
-        ctx.inputs = vals
-
-        # Call forward with the variables.
-        ys = cls._forward(ctx, *raw_vals, **kwargs)
-
-        outputs = [Tensor(y, requires_grad=requires_grad) for y in ys]
-
-        if requires_grad: # cut useless nodes
-            generation = max([x.generation for x in vals])
-            ctx.outputs = [weakref.ref(output) for output in outputs]
-            back = History(cls, ctx, generation)
-            for output in outputs:
-                output.set_creator(back)
-
-        return outputs if len(outputs) > 1 else outputs[0]
-
-    def forward(self, xs):
-        raise NotImplementedError()
-
-    def backward(self, gys):
-        raise NotImplementedError()
-
-@dataclass(unsafe_hash=True)
-class History:
-    """
-    `History` stores the history of `Function` operations that was
-    used to construct the current Variable.
-    """
-
-    last_fn: Optional[Type[Function]] = None
-    ctx: Optional[Context] = None
-    generation: int = 0
+    def apply(cls, *args, **kwargs):
+        return cls()(*args, **kwargs)

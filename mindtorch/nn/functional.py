@@ -1,132 +1,586 @@
-from typing import Optional, Tuple, List
+"""nn functional"""
 import math
 import warnings
+from typing import Optional, Tuple, List
+import numpy as np
+from mindspore.ops.auto_generate.gen_arg_handler import dtype_to_type_id
+from mindspore.common.generator import default_generator
+
 import mindtorch
-from mindtorch.dtype import typing
-from mindtorch import BACKEND
-from .._tensor import Tensor, Dependency
-from mindtorch._functions import ReLU, GELU, SoftmaxCrossEntropy, Linear, SoftmaxCrossEntropyAscend, LogSoftmax, \
-    ones, matmul, uniform
-from mindtorch._functions.nn import _conv2d, _bias_add, Dropout, _maxpool, NLLLoss, LayerNorm, \
-    Unfold, Softmax, GELUErf
+from mindtorch.executor import execute
 
-from mindspore.ops._tracefunc import trace
+generator_step_ = 12
 
-def make_tuple(inp):
-    if isinstance(inp, tuple):
-        return (1, 1, inp[0], inp[1])
-    elif isinstance(inp, int):
-        return (1, 1, inp, inp)
-
-def linear(x, W, b=None):
-    # if b is None:
-        # return matmul(x, W, transpose_b=True)
-        # b = mindtorch.zeros(W.shape[-1], W.dtype)
-    return Linear.apply(x, W, b)
-    # x_shape = x.shape
-    # if x.ndim > 2:
-    #     x = x.reshape(-1, x.shape[-1])
-    #     out = _bias_add(matmul(x, W, transpose_b=True), b)
-    #     return out.reshape(*x_shape[:-1], -1)
-    # return _bias_add(matmul(x, W, transpose_b=True), b)
-
-def relu(x):
-    return ReLU.apply(x)
-
-def gelu(x, approximate):
+def gelu(input, approximate='none'):
     if approximate == 'tanh':
-        return GELU.apply(x)
-    else:
-        # return x * 0.5 * (1.0 + mindtorch.erf(x / mindtorch.sqrt(2.0)))
-        return GELUErf.apply(x)
+        return execute('gelu', input)
+    return input * 0.5 * (1.0 + mindtorch.erf(input / mindtorch.sqrt(2.0)))
 
-def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
-    weight_shape = weight.shape
-    out_channel = weight_shape[0]
-    kernel_size = weight_shape[2:4]
-    
-    pad_mode = 'pad'
-    pad = padding
-    if isinstance(padding, tuple):
-        pad = (padding[0], padding[0], padding[1], padding[1])
-    elif isinstance(padding, int):
-        pad = (padding,) * 4
-    if not isinstance(padding, (int, tuple)):
-        pad_mode = padding
-        pad = (0,) * 4
+def relu(input, inplace=False):
+    if inplace:
+        execute('inplace_relu', input)
+        return input
+    return execute('relu', input)
 
-    stride = make_tuple(stride)
-    dilation = make_tuple(dilation)
-    output = _conv2d(input, weight, out_channel, kernel_size, pad_mode, pad, stride, dilation, groups)
-    if bias is not None:
-        output = _bias_add(output, bias)
-    return output
+def tanh(input):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.tanh(input)
+    return ops.tanh(input)
 
-def softmax(input, dim):
-    return Softmax.apply(input, axis=dim)
+def sigmoid(input):
+    return execute('sigmoid', input)
 
-def softmax_cross_entropy(logits, labels):
-    if BACKEND == 'Ascend':
-        outputs = SoftmaxCrossEntropyAscend.apply(logits, labels)
-        return outputs.mean()
-    return SoftmaxCrossEntropy.apply(logits, labels)
+def silu(input):
+    return execute('silu', input)
 
-def dropout(x: Tensor, p:int=0.5, training:bool=True) -> Tensor:
+def mish(input):
+    return ops.mish(input)
+
+def relu6(input):
+    return ops.relu6(input)
+
+def elu(input, alpha=1.0):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.elu(input, alpha)
+    return ops.elu(input, alpha)
+
+def glu(input, dim=-1):
+    return ops.glu(input, dim)
+
+def softplus(input, beta=1, threshold=20):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.softplus(input, beta, threshold)
+    return ops.softplus(input, beta, threshold)
+
+def logsigmoid(input):
+    return execute('logsigmoid', input)
+
+def leaky_relu(input, alpha=0.2):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.leaky_relu(input, alpha)
+    return ops.leaky_relu(input, alpha)
+
+def prelu(input, weight):
+    return ops.prelu(input, weight)
+
+def celu(input, alpha=1., inplace=False):
+    return ops.celu(input, alpha)
+
+def selu(input):
+    return ops.selu(input)
+
+def hardsigmoid(input, inplace=False):
+    return ops.hardsigmoid(input)
+
+def hardswish(input: mindtorch.Tensor, inplace: bool = False) -> mindtorch.Tensor:
+    return ops.hardswish(input)
+
+def hardshrink(input, lambd=0.5):
+    return execute('hard_shrink', input, lambd)
+
+def avg_pool1d(input_array, pool_size, stride, padding=0, ceil_mode=False, count_include_pad=True):
     """
-    http://arxiv.org/abs/1207.0580
+    Perform 1D average pooling on the input array of shape (N, C, L) without using explicit for loops.
+
+    Parameters:
+    - input_array (numpy array): The input array to be pooled, shape (N, C, L).
+    - pool_size (int): The size of the pooling window.
+    - stride (int): The stride of the pooling window.
+    - padding (int): The amount of zero-padding to add to both sides of the input array.
+    - ceil_mode (bool): If True, use ceil instead of floor to compute the output length.
+    - count_include_pad (bool): If True, include padding in the average calculation.
+
+    Returns:
+    - numpy array: The result of the average pooling operation.
     """
-    if training and p != 0:
-        return Dropout.apply(x, dropout=p)
-        # mask = uniform(x.shape) > p
-        # scale = 1 - p
-        # y = x * mask / scale
-        # return y
+    N, C, L = input_array.shape
+
+    # Add padding to the input array
+    if padding > 0:
+        input_array = ops.pad(input_array, ((0, 0), (0, 0), (padding, padding)), mode='constant', value=(0, 0))
+
+    # Calculate the output length
+    if ceil_mode:
+        output_length = int(np.ceil((L + 2 * padding - pool_size) / stride).astype(int) + 1)
     else:
-        return x
+        output_length = int(np.floor((L + 2 * padding - pool_size) / stride).astype(int) + 1)
 
-def max_pool2d(input, kernel_size, strides=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+    # Initialize the output array
+    output_array = ops.zeros((N, C, output_length))
 
-    if strides is None:
-        strides = kernel_size
-    kernel_size = make_tuple(kernel_size)
-    stride = make_tuple(strides)
-    pads = make_tuple(padding)
-    dilation = make_tuple(dilation)
-    
-    return _maxpool(input, kernel_size, stride, pads, dilation, ceil_mode, return_indices)
+    # Generate the starting indices of the pooling windows
+    indices = ops.arange(output_length) * stride
+    indices = indices[:, None] + ops.arange(pool_size)
 
-def unfold(input, kernel_size, dilation=1, padding=0, stride=1):
-    out = Unfold.apply(input, kernel_size=kernel_size, dilation=dilation,
-                        padding=padding, stride=stride)
-    return out.reshape(out.shape[0], -1, out.shape[-1])
+    # Ensure indices are within bounds
+    indices = ops.minimum(indices, input_array.shape[2] - 1)
 
-def log_softmax(input, dim=None, dtype=None):
-    if dim is None:
-        dim = -1
-    out = LogSoftmax.apply(input, axis=dim)
+    # Use advanced indexing to extract the pooling windows
+    windows = input_array[:, :, indices]
+
+    # Calculate the mean along the pooling window dimension
+    if count_include_pad:
+        output_array = ops.mean(windows, axis=-1)
+    else:
+        valid_counts = ops.sum(windows != 0, dim=-1)
+        valid_counts = ops.maximum(valid_counts, 1)  # Avoid division by zero
+        output_array = ops.sum(windows, dim=-1) / valid_counts
+
+    return output_array
+
+def avg_pool2d(input, kernel_size, stride=None, padding=0, ceil_mode=False, count_include_pad=True, divisor_override=0):
+    """
+    Perform 2D average pooling on the input array.
+
+    Parameters:
+    - input_array (numpy array): The input array to be pooled, shape (N, C, H, W).
+    - pool_size (tuple): The size of the pooling window (pool_height, pool_width).
+    - stride (tuple): The stride of the pooling window (stride_height, stride_width).
+    - padding (int or tuple): The amount of zero-padding to add to all sides of the input array.
+    - ceil_mode (bool): If True, use ceil instead of floor to compute the output length.
+    - count_include_pad (bool): If True, include padding in the average calculation.
+
+    Returns:
+    - numpy array: The result of the average pooling operation.
+    """
+    if use_pyboost():
+        return mindspore.ops.function.nn_func.avg_pool2d_ext(input, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override)
+
+    return ops.avg_pool2d(input, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override)
+
+def dropout(input, p=0.5, training=True, inplace=False):
+    if not training:
+        return input
+    seed, offset = default_generator._step(generator_step_)  # pylint: disable=protected-access
+    out, _ = execute('dropout_ext', input, p, seed, offset)
+    if inplace:
+        input.copy_(out)
+        return input
+    return out
+
+def dropout2d(input, p=0.5, training=False):
+    return ops.dropout2d(input, p, training)
+
+def drop_and_mask(keep_prob, seed=None):
+    seed0, seed1 = _get_seed(seed, "dropout")
+    dropout_op = ops.Dropout(keep_prob=keep_prob, Seed0=seed0, Seed1=seed1)
+    dropout_op = _set_prim_op_user_data(dropout_op, "random_cache", False)
+    out, mask = dropout_op(input)
+    return out, mask
+
+def linear(input, weight, bias=None):
+    return execute('dense', input, weight, bias)
+
+
+def binary_cross_entropy_with_logits(input, target, weight=None, reduction='mean', pos_weight=None):
+    if input.shape != target.shape:
+        target = target.unsqueeze(1).expand_as(input).to(input.dtype)
+    if use_pyboost():
+        return mindspore.mint.nn.functional.binary_cross_entropy_with_logits(input, target, weight, reduction, pos_weight)
+    return ops.binary_cross_entropy_with_logits(input, target.astype(input.dtype), weight, pos_weight, reduction)
+
+def gumbel_softmax(logits: mindtorch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1) -> mindtorch.Tensor:
+    if eps != 1e-10:
+        warnings.warn("`eps` parameter is deprecated and has no effect.")
+
+    uniform_samples = _get_cache_prim(ops.UniformReal)()(logits.shape)
+    gumbels = -ops.log(-ops.log(uniform_samples + eps) + eps) # ~Gumbel(0, 1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = softmax(gumbels, dim)
+
+    if hard:
+        # Straight through.
+        index = y_soft.argmax(dim)
+        y_hard = one_hot(index, logits.shape[dim])
+        ret = ops.stop_gradient(y_hard - y_soft) + y_soft
+    else:
+        # Reparametrization trick.
+        ret = y_soft
+    return ret
+
+def log_softmax(input, dim=-1, dtype=None):
+    if input.device.type == 'cpu':
+        return execute('log_softmax', input, dim)
+    return execute('log_softmax_ext', input, dim,
+                   dtype if dtype is None else dtype_to_type_id('LogSoftmaxExt', 'dtype', dtype))
+
+def embedding(input, weight, padding_idx=None, max_norm=None, norm_type=2.0, scale_grad_by_freq=False):
+    return execute('embedding', input, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq)
+
+def rms_norm(input, normalized_shape, weight, eps=1e-5):
+    return execute('rms_norm', input, weight, eps)[0]
+
+def fast_gelu(x):
+    return ops.fast_gelu(x)
+
+def swiglu(x, dim=-1):
+    return execute('swiglu', x, dim)
+
+def apply_rotary_pos_emb(query, key, cos, sin, position_ids, cos_format=0):
+    return mindspore.ops.auto_generate.gen_ops_def.apply_rotary_pos_emb_(
+        query, key, cos, sin, position_ids, cos_format
+    )
+
+def _reflection_pad(input, pad):
+    """reflection pad"""
+    out = input
+    if len(pad) == 2:
+        out = execute('reflection_pad_1d', input, pad)
+    elif len(pad) == 4:
+        out = execute('reflection_pad_2d', input, pad)
+    else:
+        out = execute('reflection_pad_3d', input, pad)
+    return out
+
+def _replication_pad(input, pad):
+    """replication pad"""
+    out = input
+    if len(pad) == 2:
+        out = execute('replication_pad_1d', input, pad)
+    elif len(pad) == 4:
+        out = execute('replication_pad_2d', input, pad)
+    else:
+        out = execute('replication_pad_3d', input, pad)
+    return out
+
+def pad(input, pad, mode='constant', value=0.0):
+    out = input
+    if (isinstance(pad, tuple) and not pad):
+        return out
+    if mode == "constant":
+        value = 0 if value is None else value
+        out = execute('constant_pad_nd', input, pad, value)
+    else:
+        if value is not None and value != 0:
+            raise ValueError(f"Padding mode {mode} doesn\'t take in value argument.")
+        if mode == "circular":
+            out = _circular_pad(input, pad)
+        elif mode == "reflect":
+            out = _reflection_pad(input, pad)
+        elif mode == "replicate":
+            out = _replication_pad(input, pad)
+        else:
+            raise ValueError(f"Pad filling mode must be 'constant' 'circular' 'reflect' or 'replicate'.")
+    return out
+
+def nll_loss(input, target, weight=None, ignore_index=-100, reduction='mean', label_smoothing=0.0):
+    return _inner_nll_loss(input, target, weight, ignore_index, reduction, label_smoothing)
+
+def cross_entropy(input, target, weight=None, ignore_index=-100, reduction='mean', label_smoothing=0.0):
+    input = input.to(mindtorch.float32)
+    class_dim = 0 if input.ndim == 1 else 1
+    if target.dtype in [mindtorch.float32, mindtorch.float16]:
+        return _cross_entropy(input, target, class_dim, weight, reduction, label_smoothing)
+    return nll_loss(log_softmax(input, class_dim), target, weight, ignore_index, reduction, label_smoothing)
+
+
+def _cross_entropy(inputs, target, target_dim, weight=None, reduction='mean', label_smoothing=0.0):
+    """cross entropy inner function"""
+    class_dim = 0 if inputs.ndim == 1 else 1
+    n_classes = inputs.shape[class_dim]
+    inputs = log_softmax(inputs, class_dim)
+    if label_smoothing > 0.0:
+        target = target * (1 - label_smoothing) + label_smoothing / n_classes
+
+    if weight is None:
+        weight = mindtorch.ones_like(inputs)
+    elif inputs.ndim != 1:
+        broadcast_shape = [1 for _ in range(inputs.ndim)]
+        broadcast_shape[1] = weight.shape[0]
+        weight = weight.reshape(broadcast_shape)
+
+    if reduction == 'mean':
+        return -(inputs * target * weight).sum() / (inputs.size / n_classes)
+    if reduction == 'sum':
+        return -(inputs * target * weight).sum()
+    return -(inputs * target * weight).sum(class_dim)
+
+
+def _inner_nll_loss(inputs, target, weight=None, ignore_index=-100, reduction='mean', label_smoothing=0.0):
+    ndim = inputs.ndim
+    if ndim == 2:
+        ret = _nll_loss(inputs, target, -1, weight, ignore_index, reduction, label_smoothing)
+    elif ndim == 4:
+        ret = _nll_loss(inputs, target, 1, weight, ignore_index, reduction, label_smoothing)
+    elif ndim == 1:
+        ret = _nll_loss(inputs, target, 0, weight, ignore_index, reduction, label_smoothing)
+    else:
+        n = inputs.shape[0]
+        c = inputs.shape[1]
+        out_size = (n,) + inputs.shape[2:]
+        inputs = inputs.view((n, c, 1, -1))
+        target = target.view((n, 1, -1))
+        if reduction != 'none':
+            ret = _nll_loss(inputs, target, 1, weight, ignore_index, reduction, label_smoothing)
+        else:
+            ret = _nll_loss(inputs, target, 1, weight, ignore_index, label_smoothing=label_smoothing)
+            ret = ret.view(out_size)
+    return ret
+
+
+def _nll_loss(inputs, target, target_dim=-1, weight=None, ignore_index=None, reduction='none', label_smoothing=0.0):
+    """nll loss inner function"""
+    if target.ndim == inputs.ndim - 1:
+        target = target.unsqueeze(target_dim)
+    if ignore_index is not None:
+        non_pad_mask = mindtorch.equal(target, ignore_index)
+        target = target.masked_fill(non_pad_mask, 0)
+    else:
+        non_pad_mask = target
+    if weight is not None:
+        loss_weights = mindtorch.gather(weight, 0, target)
+        orig_shape = inputs.shape
+        if inputs.ndim != 2:
+            inputs = inputs.view(orig_shape[:2] + (-1,))
+            weight = weight.view(weight.shape + (1,))
+        weighted_inputs = inputs * weight
+        weighted_inputs = weighted_inputs.view(orig_shape)
+        loss = mindtorch.neg(mindtorch.gather(weighted_inputs, target_dim, target))
+        smooth_loss = mindtorch.neg(weighted_inputs.sum(dim=target_dim, keepdim=True))
+    else:
+        loss = mindtorch.neg(mindtorch.gather(inputs, target_dim, target))
+        smooth_loss = mindtorch.neg(inputs.sum(dim=target_dim, keepdim=True))
+        loss_weights = mindtorch.ones_like(loss)
+
+    if ignore_index is not None:
+        loss = loss.masked_fill(non_pad_mask, 0.)
+        loss_weights = loss_weights.masked_fill(non_pad_mask, 0.)
+        smooth_loss = smooth_loss.masked_fill(non_pad_mask, 0.)
+
+    loss = loss.squeeze(target_dim)
+    smooth_loss = smooth_loss.squeeze(target_dim)
+
+    if reduction == 'sum':
+        loss = loss.sum()
+        smooth_loss = smooth_loss.sum()
+    if reduction == 'mean':
+        loss = loss.sum() / loss_weights.sum()
+        smooth_loss = smooth_loss.sum() / loss_weights.sum()
+
+    eps_i = label_smoothing / inputs.shape[target_dim]
+    if label_smoothing != 0:
+        loss = (1. - label_smoothing) * loss + eps_i * smooth_loss
+
+    return loss
+
+def mse_loss(input, target, reduction='mean'):
+    return ops.mse_loss(input, target, reduction)
+
+def l1_loss(input, target, reduction='mean'):
+    return ops.l1_loss(input, target, reduction)
+
+def smooth_l1_loss(input, target, beta=1.0, reduction='none'):
+    input = input.to(mindspore.float32)
+    target = target.to(mindspore.float32)
+    return ops.smooth_l1_loss(input, target, beta, reduction)
+
+def kl_div(logits, labels, reduction='mean', log_target=False):
+    if log_target:
+        labels = ops.log(labels)
+    return ops.kl_div(logits, labels, reduction)
+
+def manual_softmax(x, dim=-1):
+    exp_x = ops.exp(x - ops.max(x, axis=dim, keepdims=True)[0])
+    return exp_x / ops.sum(exp_x, dim=dim, keepdim=True)
+
+def softmax(input, dim=-1, *, dtype=None):
+    out = execute('softmax', input, dim)
     if dtype is not None:
         out = out.to(dtype)
     return out
 
+def layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5):
+    return execute('layer_norm_ext', input, normalized_shape, weight, bias, eps)
+    # if weight is None:
+    #     weight = ops.ones(normalized_shape, dtype=input.dtype)
+    # if bias is None:
+    #     bias = ops.zeros(normalized_shape, dtype=input.dtype)
+    # if use_pyboost():
+    #     return mindspore.mint.nn.functional.layer_norm(input, normalized_shape, weight, bias, eps)
+    # if weight is not None:
+    #     begin_axis = input.ndim - weight.ndim
+    # else:
+    #     begin_axis = -1
+    # _layer_norm = _get_cache_prim(ops.LayerNorm)(begin_axis, begin_axis, epsilon=eps)
+    # return _layer_norm(input, weight, bias)[0]
 
-def nll_loss(input, target, weight=None, ignore_index=- 100, reduction='mean'):
+def interpolate(input, size=None, scale_factor=None, mode='nearest', align_corners=None, recompute_scale_factor=None, antialias=False):
+    return ops.interpolate(input, size, scale_factor, mode, align_corners, recompute_scale_factor)
+
+def normalize(input, p=2.0, dim=1, eps=1e-6):
+    r"""
+    Normalize a tensor along a specified dimension.
+
+    Args:
+        input (mindtorch.Tensor): The input tensor to be normalized.
+        p (float, optional): The power parameter for the normalization. Default is 2.0.
+        dim (int, optional): The dimension along which to normalize the tensor. Default is 1.
+
+    Returns:
+        None
+
+    Raises:
+        TypeError: If the input is not a tensor.
+        ValueError: If the specified dimension is out of range or if the power parameter is not a positive number.
+
+    This function normalizes the input tensor along the specified dimension using the power parameter 'p'.
+    The normalization is performed by dividing each element of the tensor by the Lp norm of the tensor along the specified dimension.
+    The Lp norm is defined as the p-th root of the sum of the absolute values raised to the power of 'p'.
+    The resulting tensor will have the same shape as the input tensor.
+    """
+    return input / ops.norm(input, ord=p, dim=dim, keepdim=True)
+
+def batch_norm(input, running_mean, running_var, weight=None, bias=None, training=False, momentum=0.1, eps=1e-05):
+
+    if running_mean is None:
+        running_mean = ops.ones(input.shape[1])
+    if running_var is None:
+        running_var = ops.zeros(input.shape[1])
     if weight is None:
-        weight = ones(input.shape[-1])
-    return NLLLoss.apply(input, target, weight, ignore_index=ignore_index, reduction=reduction)
+        weight = ops.ones(input.shape[1])
+    if bias is None:
+        bias = ops.zeros(input.shape[1])
 
-def layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-05):
-    norm_ndim = len(normalized_shape)
-    begin_axis = input.ndim - norm_ndim
-    return LayerNorm.apply(input, weight, bias, begin_norm_axis=begin_axis, 
-                           begin_params_axis=begin_axis, epsilon=eps)
+    if use_pyboost():
+        return mindspore.mint.nn.functional.batch_norm(
+            input,
+            running_mean,
+            running_var,
+            weight,
+            bias,
+            training,
+            momentum,
+            eps
+        )
+    return ops.batch_norm(
+        input,
+        running_mean,
+        running_var,
+        weight,
+        bias,
+        training,
+        momentum,
+        eps
+    )
+
+def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    pad_mode = 'pad'
+    if not isinstance(padding, (int, tuple)):
+        pad_mode = padding
+
+    return ops.conv2d(input, weight, bias=bias, stride=stride, pad_mode=pad_mode, padding=padding, dilation=dilation, groups=groups)
+
+def max_pool2d(input, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.max_pool2d(input, kernel_size, stride, padding, dilation, ceil_mode=ceil_mode, return_indices=return_indices)
+    return ops.max_pool2d(input, kernel_size, stride, padding, dilation, ceil_mode=ceil_mode, return_indices=return_indices)
+
+def max_pool1d(input, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+    if stride is None:
+        stride = kernel_size
+
+    kernel_size = (1, kernel_size)
+    stride = (1, stride)
+    padding = (0, padding)
+    dilation = (1, dilation)
+
+    input_2d = input.unsqueeze(2)
+
+    if return_indices:
+        output_2d, indices_2d = max_pool2d(input_2d, kernel_size, stride, padding, dilation, ceil_mode, return_indices)
+        output_1d = output_2d.squeeze(2)
+        indices_1d = indices_2d.squeeze(2)
+        return output_1d, indices_1d
+    else:
+        output_2d = max_pool2d(input_2d, kernel_size, stride, padding, dilation, ceil_mode)
+        output_1d = output_2d.squeeze(2)
+        return output_1d
+
+
+def group_norm(input, num_groups, weight=None, bias=None, eps=1e-5):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.group_norm(input, num_groups, weight, bias, eps)
+
+    input_shape = input.shape
+    N = input_shape[0]
+    C = input_shape[1]
+    input_reshaped = input.view(1, N * num_groups, -1 if N!=0 else 1)
+    outputs = batch_norm(input_reshaped, None, None, None, None, True, 0., eps)
+    out = outputs.view(input_shape)
+    affine_param_shape = [1] * input.ndim
+    affine_param_shape[1] = C
+    affine_param_shape = tuple(affine_param_shape)
+    if weight is not None and bias is not None:
+        out = bias.view(affine_param_shape).addcmul(out, weight.view(affine_param_shape), 1)
+    elif weight is not None:
+        out = out.mul(weight.view(affine_param_shape))
+    elif bias is not None:
+        out = out.add(bias.view(affine_param_shape))
+    return out
+
+
+def _in_projection(
+    q,
+    k,
+    v,
+    w_q,
+    w_k,
+    w_v,
+    b_q=None,
+    b_k=None,
+    b_v=None,
+):
+    r"""
+    Performs the in-projection step of the attention operation. This is simply
+    a triple of linear projections, with shape constraints on the weights which
+    ensure embedding dimension uniformity in the projected outputs.
+    Output is a triple containing projection tensors for query, key and value.
+    Args:
+        q, k, v: query, key and value tensors to be projected.
+        w_q, w_k, w_v: weights for q, k and v, respectively.
+        b_q, b_k, b_v: optional biases for q, k and v, respectively.
+    Shape:
+        Inputs:
+        - q: :math:`(Qdims..., Eq)` where Eq is the query embedding dimension and Qdims are any
+            number of leading dimensions.
+        - k: :math:`(Kdims..., Ek)` where Ek is the key embedding dimension and Kdims are any
+            number of leading dimensions.
+        - v: :math:`(Vdims..., Ev)` where Ev is the value embedding dimension and Vdims are any
+            number of leading dimensions.
+        - w_q: :math:`(Eq, Eq)`
+        - w_k: :math:`(Eq, Ek)`
+        - w_v: :math:`(Eq, Ev)`
+        - b_q: :math:`(Eq)`
+        - b_k: :math:`(Eq)`
+        - b_v: :math:`(Eq)`
+        Output: in output triple :math:`(q', k', v')`,
+         - q': :math:`[Qdims..., Eq]`
+         - k': :math:`[Kdims..., Eq]`
+         - v': :math:`[Vdims..., Eq]`
+    """
+    Eq, Ek, Ev = q.shape[-1], k.shape[-1], v.shape[-1]
+    assert w_q.shape == (
+        Eq, Eq), f"expecting query weights shape of {(Eq, Eq)}, but got {w_q.shape}"
+    assert w_k.shape == (
+        Eq, Ek), f"expecting key weights shape of {(Eq, Ek)}, but got {w_k.shape}"
+    assert w_v.shape == (
+        Eq, Ev), f"expecting value weights shape of {(Eq, Ev)}, but got {w_v.shape}"
+    assert b_q is None or b_q.shape == (
+        Eq,), f"expecting query bias shape of {(Eq,)}, but got {b_q.shape}"
+    assert b_k is None or b_k.shape == (
+        Eq,), f"expecting key bias shape of {(Eq,)}, but got {b_k.shape}"
+    assert b_v is None or b_v.shape == (
+        Eq,), f"expecting value bias shape of {(Eq,)}, but got {b_v.shape}"
+    return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
+
 
 def _in_projection_packed(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    w: Tensor,
-    b: Optional[Tensor] = None,
-) -> List[Tensor]:
+    q: mindtorch.Tensor,
+    k: mindtorch.Tensor,
+    v: mindtorch.Tensor,
+    w: mindtorch.Tensor,
+    b: Optional[mindtorch.Tensor] = None,
+) -> List[mindtorch.Tensor]:
     r"""
     Performs the in-projection step of the attention operation, using packed weights.
     Output is a triple containing projection tensors for query, key and value.
@@ -154,15 +608,15 @@ def _in_projection_packed(
         - in output list :math:`[q', k', v']`, each output tensor will have the
             same shape as the corresponding input tensor.
     """
-    E = q.size(-1)
+    E = q.shape[-1]
     if k is v:
         if q is k:
             # self-attention
             # proj = linear(q, w, b)
             # # reshape to 3, E and not E, 3 is deliberate for better memory coalescing and keeping same order as chunk()
-            # proj = proj.unflatten(-1, (3, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
+            # proj = proj.unflatten(-1, (3, E)).unsqueeze(0).swapaxes(0, -2).squeeze(-2)
             # return proj[0], proj[1], proj[2]
-            return linear(q, w, b).chunk(3, dim=-1)
+            return linear(q, w, b).chunk(3, axis=-1)
         else:
             # encoder-decoder attention
             w_q, w_kv = w.split([E, E * 2])
@@ -173,9 +627,9 @@ def _in_projection_packed(
             # q_proj = linear(q, w_q, b_q)
             # kv_proj = linear(k, w_kv, b_kv)
             # # reshape to 2, E and not E, 2 is deliberate for better memory coalescing and keeping same order as chunk()
-            # kv_proj = kv_proj.unflatten(-1, (2, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
+            # kv_proj = kv_proj.unflatten(-1, (2, E)).unsqueeze(0).swapaxes(0, -2).squeeze(-2)
             # return (q_proj, kv_proj[0], kv_proj[1])
-            return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+            return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, axis=-1)
     else:
         w_q, w_k, w_v = w.chunk(3)
         if b is None:
@@ -184,223 +638,100 @@ def _in_projection_packed(
             b_q, b_k, b_v = b.chunk(3)
         return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
 
+def scaled_dot_product_attention(query, key, value, attn_mask, dropout_p, is_causal):
+    embed_size = query.shape[-1]
+    scaling_factor = ops.sqrt(ops.sqrt(mindtorch.Tensor(embed_size, dtype=query.dtype)))
+    query = query / scaling_factor
 
-def _in_projection(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    w_q: Tensor,
-    w_k: Tensor,
-    w_v: Tensor,
-    b_q: Optional[Tensor] = None,
-    b_k: Optional[Tensor] = None,
-    b_v: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    r"""
-    Performs the in-projection step of the attention operation. This is simply
-    a triple of linear projections, with shape constraints on the weights which
-    ensure embedding dimension uniformity in the projected outputs.
-    Output is a triple containing projection tensors for query, key and value.
+    if is_causal:
+        L = query.shape[-2], S = key.shape[-2]
+        attn_mask = ops.ones((L, S), mindspore.bool_).tril()
 
-    Args:
-        q, k, v: query, key and value tensors to be projected.
-        w_q, w_k, w_v: weights for q, k and v, respectively.
-        b_q, b_k, b_v: optional biases for q, k and v, respectively.
+    attn = ops.matmul(query, key.swapaxes(-2, -1) / scaling_factor)
+    if attn_mask is not None:
+        attn = attn + attn_mask
+    attn = softmax(attn, -1)
+    if dropout_p > 0.:
+        attn = ops.dropout(attn, dropout_p)
+    output = ops.matmul(attn, value)
 
-    Shape:
-        Inputs:
-        - q: :math:`(Qdims..., Eq)` where Eq is the query embedding dimension and Qdims are any
-            number of leading dimensions.
-        - k: :math:`(Kdims..., Ek)` where Ek is the key embedding dimension and Kdims are any
-            number of leading dimensions.
-        - v: :math:`(Vdims..., Ev)` where Ev is the value embedding dimension and Vdims are any
-            number of leading dimensions.
-        - w_q: :math:`(Eq, Eq)`
-        - w_k: :math:`(Eq, Ek)`
-        - w_v: :math:`(Eq, Ev)`
-        - b_q: :math:`(Eq)`
-        - b_k: :math:`(Eq)`
-        - b_v: :math:`(Eq)`
-
-        Output: in output triple :math:`(q', k', v')`,
-         - q': :math:`[Qdims..., Eq]`
-         - k': :math:`[Kdims..., Eq]`
-         - v': :math:`[Vdims..., Eq]`
-
-    """
-    Eq, Ek, Ev = q.size(-1), k.size(-1), v.size(-1)
-    assert w_q.shape == (Eq, Eq), f"expecting query weights shape of {(Eq, Eq)}, but got {w_q.shape}"
-    assert w_k.shape == (Eq, Ek), f"expecting key weights shape of {(Eq, Ek)}, but got {w_k.shape}"
-    assert w_v.shape == (Eq, Ev), f"expecting value weights shape of {(Eq, Ev)}, but got {w_v.shape}"
-    assert b_q is None or b_q.shape == (Eq,), f"expecting query bias shape of {(Eq,)}, but got {b_q.shape}"
-    assert b_k is None or b_k.shape == (Eq,), f"expecting key bias shape of {(Eq,)}, but got {b_k.shape}"
-    assert b_v is None or b_v.shape == (Eq,), f"expecting value bias shape of {(Eq,)}, but got {b_v.shape}"
-    return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
+    return output
 
 
-def _mha_shape_check(query: Tensor, key: Tensor, value: Tensor,
-                     key_padding_mask: Optional[Tensor], attn_mask: Optional[Tensor], num_heads: int):
+def _mha_shape_check(query, key, value, key_padding_mask, attn_mask, num_heads):
     # Verifies the expected shape for `query, `key`, `value`, `key_padding_mask` and `attn_mask`
     # and returns if the input is batched or not.
     # Raises an error if `query` is not 2-D (unbatched) or 3-D (batched) tensor.
 
     # Shape check.
-    if query.dim() == 3:
+    if query.ndim == 3:
         # Batched Inputs
         is_batched = True
-        assert key.dim() == 3 and value.dim() == 3, \
+        assert key.ndim == 3 and value.ndim == 3, \
             ("For batched (3-D) `query`, expected `key` and `value` to be 3-D"
-             f" but found {key.dim()}-D and {value.dim()}-D tensors respectively")
+             f" but found {key.ndim}-D and {value.ndim}-D tensors respectively")
         if key_padding_mask is not None:
-            assert key_padding_mask.dim() == 2, \
+            assert key_padding_mask.ndim == 2, \
                 ("For batched (3-D) `query`, expected `key_padding_mask` to be `None` or 2-D"
-                 f" but found {key_padding_mask.dim()}-D tensor instead")
+                 f" but found {key_padding_mask.ndim}-D tensor instead")
         if attn_mask is not None:
-            assert attn_mask.dim() in (2, 3), \
+            assert attn_mask.ndim in (2, 3), \
                 ("For batched (3-D) `query`, expected `attn_mask` to be `None`, 2-D or 3-D"
-                 f" but found {attn_mask.dim()}-D tensor instead")
-    elif query.dim() == 2:
+                 f" but found {attn_mask.ndim}-D tensor instead")
+    elif query.ndim == 2:
         # Unbatched Inputs
         is_batched = False
-        assert key.dim() == 2 and value.dim() == 2, \
+        assert key.ndim == 2 and value.ndim == 2, \
             ("For unbatched (2-D) `query`, expected `key` and `value` to be 2-D"
-             f" but found {key.dim()}-D and {value.dim()}-D tensors respectively")
+             f" but found {key.ndim}-D and {value.ndim}-D tensors respectively")
 
         if key_padding_mask is not None:
-            assert key_padding_mask.dim() == 1, \
+            assert key_padding_mask.ndim == 1, \
                 ("For unbatched (2-D) `query`, expected `key_padding_mask` to be `None` or 1-D"
-                 f" but found {key_padding_mask.dim()}-D tensor instead")
+                 f" but found {key_padding_mask.ndim}-D tensor instead")
 
         if attn_mask is not None:
-            assert attn_mask.dim() in (2, 3), \
+            assert attn_mask.ndim in (2, 3), \
                 ("For unbatched (2-D) `query`, expected `attn_mask` to be `None`, 2-D or 3-D"
-                 f" but found {attn_mask.dim()}-D tensor instead")
-            if attn_mask.dim() == 3:
+                 f" but found {attn_mask.ndim}-D tensor instead")
+            if attn_mask.ndim == 3:
                 expected_shape = (num_heads, query.shape[0], key.shape[0])
                 assert attn_mask.shape == expected_shape, \
                     (f"Expected `attn_mask` shape to be {expected_shape} but got {attn_mask.shape}")
     else:
         raise AssertionError(
-            f"query should be unbatched 2D or batched 3D tensor but received {query.dim()}-D query tensor")
+            f"query should be unbatched 2D or batched 3D tensor but received {query.ndim}-D query tensor")
 
     return is_batched
 
-def _canonical_mask(
-        mask: Optional[Tensor],
-        mask_name: str,
-        other_type: Optional[typing.Type],
-        other_name: str,
-        target_type: typing.Type,
-        check_other: bool = True,
-) -> Optional[Tensor]:
-
-    if mask is not None:
-        _mask_dtype = mask.dtype
-        _mask_is_float = mindtorch.is_floating_point(mask)
-        if _mask_dtype != mindtorch.bool and not _mask_is_float:
-            raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported")
-        if check_other and other_type is not None:
-            if _mask_dtype != other_type:
-                warnings.warn(
-                    f"Support for mismatched {mask_name} and {other_name} "
-                    "is deprecated. Use same type for both instead."
-                )
-        if not _mask_is_float:
-            mask = (
-                mindtorch.zeros_like(mask, dtype=target_type)
-                .masked_fill_(mask, float("-inf"))
-            )
-    return mask
-
-def _none_or_dtype(input: Optional[Tensor]) -> Optional[typing.Type]:
-    if input is None:
-        return None
-    elif isinstance(input, mindtorch.Tensor):
-        return input.dtype
-    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")
-
-def scaled_dot_product_attention(
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
-    attn_mask: Optional[Tensor] = None,
-    dropout_p: float = 0.0,
-    is_causal: bool = False
-) -> Tuple[Tensor, Tensor]:
-    r"""
-    Computes scaled dot product attention on query, key and value tensors, using
-    an optional attention mask if passed, and applying dropout if a probability
-    greater than 0.0 is specified.
-    Returns a tensor pair containing attended values and attention weights.
-
-    Args:
-        q, k, v: query, key and value tensors. See Shape section for shape details.
-        attn_mask: optional tensor containing mask values to be added to calculated
-            attention. May be 2D or 3D; see Shape section for details.
-        dropout_p: dropout probability. If greater than 0.0, dropout is applied.
-
-    Shape:
-        - q: :math:`(B, Nt, E)` where B is batch size, Nt is the target sequence length,
-            and E is embedding dimension.
-        - key: :math:`(B, Ns, E)` where B is batch size, Ns is the source sequence length,
-            and E is embedding dimension.
-        - value: :math:`(B, Ns, E)` where B is batch size, Ns is the source sequence length,
-            and E is embedding dimension.
-        - attn_mask: either a 3D tensor of shape :math:`(B, Nt, Ns)` or a 2D tensor of
-            shape :math:`(Nt, Ns)`.
-
-        - Output: attention values have shape :math:`(B, Nt, E)`; attention weights
-            have shape :math:`(B, Nt, Ns)`
-    """
-    B, Nt, E = q.shape
-    q = q / math.sqrt(E)
-    # (B, Nt, E) x (B, E, Ns) -> (B, Nt, Ns)
-    if is_causal:
-        # const auto L = query.sym_size(-2), S = key.sym_size(-2);
-        # attn_mask = at::ones_symint({L, S}, query.options().dtype(at::kBool)).tril();
-        # attn_mask = convert_boolean_attn_mask(attn_mask, query.dtype());
-        pass
-
-    if attn_mask is not None:
-        attn = mindtorch.baddbmm(attn_mask, q, k.transpose(-2, -1))
-    else:
-        attn = mindtorch.bmm(q, k.transpose(-2, -1))
-
-    attn = softmax(attn, dim=-1)
-    if dropout_p > 0.0:
-        attn = dropout(attn, p=dropout_p)
-    # (B, Nt, Ns) x (B, Ns, E) -> (B, Nt, E)
-    output = mindtorch.bmm(attn, v)
-    return output, attn
 
 def multi_head_attention_forward(
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
+    query: mindtorch.Tensor,
+    key: mindtorch.Tensor,
+    value: mindtorch.Tensor,
     embed_dim_to_check: int,
     num_heads: int,
-    in_proj_weight: Optional[Tensor],
-    in_proj_bias: Optional[Tensor],
-    bias_k: Optional[Tensor],
-    bias_v: Optional[Tensor],
+    in_proj_weight: Optional[mindtorch.Tensor],
+    in_proj_bias: Optional[mindtorch.Tensor],
+    bias_k: Optional[mindtorch.Tensor],
+    bias_v: Optional[mindtorch.Tensor],
     add_zero_attn: bool,
     dropout_p: float,
-    out_proj_weight: Tensor,
-    out_proj_bias: Optional[Tensor],
+    out_proj_weight: mindtorch.Tensor,
+    out_proj_bias: Optional[mindtorch.Tensor],
     training: bool = True,
-    key_padding_mask: Optional[Tensor] = None,
+    key_padding_mask: Optional[mindtorch.Tensor] = None,
     need_weights: bool = True,
-    attn_mask: Optional[Tensor] = None,
+    attn_mask: Optional[mindtorch.Tensor] = None,
     use_separate_proj_weight: bool = False,
-    q_proj_weight: Optional[Tensor] = None,
-    k_proj_weight: Optional[Tensor] = None,
-    v_proj_weight: Optional[Tensor] = None,
-    static_k: Optional[Tensor] = None,
-    static_v: Optional[Tensor] = None,
+    q_proj_weight: Optional[mindtorch.Tensor] = None,
+    k_proj_weight: Optional[mindtorch.Tensor] = None,
+    v_proj_weight: Optional[mindtorch.Tensor] = None,
+    static_k: Optional[mindtorch.Tensor] = None,
+    static_v: Optional[mindtorch.Tensor] = None,
     average_attn_weights: bool = True,
     is_causal: bool = False,
-) -> Tuple[Tensor, Optional[Tensor]]:
+) -> Tuple[mindtorch.Tensor, Optional[mindtorch.Tensor]]:
     r"""
     Args:
         query, key, value: map a query and a set of key-value pairs to an output.
@@ -452,14 +783,14 @@ def multi_head_attention_forward(
         - value: :math:`(S, E)` or :math:`(S, N, E)` where S is the source sequence length, N is the batch size, E is
           the embedding dimension.
         - key_padding_mask: :math:`(S)` or :math:`(N, S)` where N is the batch size, S is the source sequence length.
-          If a FloatTensor is provided, it will be directly added to the value.
-          If a BoolTensor is provided, the positions with the
+          If a Floatmindtorch.Tensor is provided, it will be directly added to the value.
+          If a Boolmindtorch.Tensor is provided, the positions with the
           value of ``True`` will be ignored while the position with the value of ``False`` will be unchanged.
         - attn_mask: 2D mask :math:`(L, S)` where L is the target sequence length, S is the source sequence length.
           3D mask :math:`(N*num_heads, L, S)` where N is the batch size, L is the target sequence length,
           S is the source sequence length. attn_mask ensures that position i is allowed to attend the unmasked
-          positions. If a BoolTensor is provided, positions with ``True``
-          are not allowed to attend while ``False`` values will be unchanged. If a FloatTensor
+          positions. If a Boolmindtorch.Tensor is provided, positions with ``True``
+          are not allowed to attend while ``False`` values will be unchanged. If a Floatmindtorch.Tensor
           is provided, it will be added to the attention weight.
         - static_k: :math:`(N*num_heads, S, E/num_heads)`, where S is the source sequence length,
           N is the batch size, E is the embedding dimension. E/num_heads is the head dimension.
@@ -563,24 +894,24 @@ def multi_head_attention_forward(
 
     if attn_mask is not None:
         # ensure attn_mask's dim is 3
-        if attn_mask.dim() == 2:
+        if attn_mask.ndim == 2:
             correct_2d_size = (tgt_len, src_len)
             if attn_mask.shape != correct_2d_size:
                 raise RuntimeError(f"The shape of the 2D attn_mask is {attn_mask.shape}, but should be {correct_2d_size}.")
             attn_mask = attn_mask.unsqueeze(0)
-        elif attn_mask.dim() == 3:
+        elif attn_mask.ndim == 3:
             correct_3d_size = (bsz * num_heads, tgt_len, src_len)
             if attn_mask.shape != correct_3d_size:
                 raise RuntimeError(f"The shape of the 3D attn_mask is {attn_mask.shape}, but should be {correct_3d_size}.")
         else:
-            raise RuntimeError(f"attn_mask's dimension {attn_mask.dim()} is not supported")
+            raise RuntimeError(f"attn_mask's dimension {attn_mask.ndim} is not supported")
 
     # add bias along batch dimension (currently second)
     if bias_k is not None and bias_v is not None:
         assert static_k is None, "bias cannot be added to static key."
         assert static_v is None, "bias cannot be added to static value."
-        k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
-        v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
+        k = ops.cat([k, bias_k.repeat(1, bsz, 1)])
+        v = ops.cat([v, bias_v.repeat(1, bsz, 1)])
         if attn_mask is not None:
             attn_mask = pad(attn_mask, (0, 1))
         if key_padding_mask is not None:
@@ -592,45 +923,45 @@ def multi_head_attention_forward(
     #
     # reshape q, k, v for multihead attention and make em batch first
     #
-    q = q.view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+    q = q.view(tgt_len, bsz * num_heads, head_dim).swapaxes(0, 1)
     if static_k is None:
-        k = k.view(k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        k = k.view(k.shape[0], bsz * num_heads, head_dim).swapaxes(0, 1)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
-        assert static_k.size(0) == bsz * num_heads, \
-            f"expecting static_k.size(0) of {bsz * num_heads}, but got {static_k.size(0)}"
-        assert static_k.size(2) == head_dim, \
-            f"expecting static_k.size(2) of {head_dim}, but got {static_k.size(2)}"
+        assert static_k.shape[0] == bsz * num_heads, \
+            f"expecting static_k.shape[0] of {bsz * num_heads}, but got {static_k.shape[0]}"
+        assert static_k.shape[2] == head_dim, \
+            f"expecting static_k.shape[2] of {head_dim}, but got {static_k.shape[2]}"
         k = static_k
     if static_v is None:
-        v = v.view(v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        v = v.view(v.shape[0], bsz * num_heads, head_dim).swapaxes(0, 1)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
-        assert static_v.size(0) == bsz * num_heads, \
-            f"expecting static_v.size(0) of {bsz * num_heads}, but got {static_v.size(0)}"
-        assert static_v.size(2) == head_dim, \
-            f"expecting static_v.size(2) of {head_dim}, but got {static_v.size(2)}"
+        assert static_v.shape[0] == bsz * num_heads, \
+            f"expecting static_v.shape[0] of {bsz * num_heads}, but got {static_v.shape[0]}"
+        assert static_v.shape[2] == head_dim, \
+            f"expecting static_v.shape[2] of {head_dim}, but got {static_v.shape[2]}"
         v = static_v
 
     # add zero attention along batch dimension (now first)
     if add_zero_attn:
         zero_attn_shape = (bsz * num_heads, 1, head_dim)
-        k = mindtorch.cat([k, mindtorch.zeros(zero_attn_shape, dtype=k.dtype)], dim=1)
-        v = mindtorch.cat([v, mindtorch.zeros(zero_attn_shape, dtype=v.dtype)], dim=1)
+        k = ops.cat([k, ops.zeros(zero_attn_shape, dtype=k.dtype)], axis=1)
+        v = ops.cat([v, ops.zeros(zero_attn_shape, dtype=v.dtype)], axis=1)
         if attn_mask is not None:
             attn_mask = pad(attn_mask, (0, 1))
         if key_padding_mask is not None:
             key_padding_mask = pad(key_padding_mask, (0, 1))
 
     # update source sequence length after adjustments
-    src_len = k.size(1)
+    src_len = k.shape[1]
 
     # merge key padding and attention masks
     if key_padding_mask is not None:
         assert key_padding_mask.shape == (bsz, src_len), \
             f"expecting key_padding_mask shape of {(bsz, src_len)}, but got {key_padding_mask.shape}"
         key_padding_mask = key_padding_mask.view(bsz, 1, 1, src_len).   \
-            expand(-1, num_heads, -1, -1).reshape(bsz * num_heads, 1, src_len)
+            broadcast_to((-1, num_heads, -1, -1)).reshape(bsz * num_heads, 1, src_len)
         if attn_mask is None:
             attn_mask = key_padding_mask
         else:
@@ -651,23 +982,23 @@ def multi_head_attention_forward(
         assert not (is_causal and attn_mask is None), "FIXME: is_causal not implemented for need_weights"
 
         if attn_mask is not None:
-            attn_output_weights = mindtorch.baddbmm(attn_mask, q_scaled, k.transpose(-2, -1))
+            attn_output_weights = ops.baddbmm(attn_mask, q_scaled, k.swapaxes(-2, -1))
         else:
-            attn_output_weights = mindtorch.bmm(q_scaled, k.transpose(-2, -1))
+            attn_output_weights = ops.bmm(q_scaled, k.swapaxes(-2, -1))
         attn_output_weights = softmax(attn_output_weights, dim=-1)
         if dropout_p > 0.0:
             attn_output_weights = dropout(attn_output_weights, p=dropout_p)
 
-        attn_output = mindtorch.bmm(attn_output_weights, v)
+        attn_output = ops.bmm(attn_output_weights, v)
 
-        attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
+        attn_output = attn_output.swapaxes(0, 1).view(tgt_len * bsz, embed_dim)
         attn_output = linear(attn_output, out_proj_weight, out_proj_bias)
-        attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+        attn_output = attn_output.view(tgt_len, bsz, attn_output.shape[1])
 
         # optionally average attention weights over heads
         attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
         if average_attn_weights:
-            attn_output_weights = attn_output_weights.mean(dim=1)
+            attn_output_weights = attn_output_weights.mean(axis=1)
 
         if not is_batched:
             # squeeze the output if input was unbatched
@@ -679,7 +1010,7 @@ def multi_head_attention_forward(
         # if attn_mask's shape is (1, L, S) we need to unsqueeze to (1, 1, L, S)
         # in order to match the input for SDPA of (N, num_heads, L, S)
         if attn_mask is not None:
-            if attn_mask.size(0) == 1 and attn_mask.dim() == 3:
+            if attn_mask.shape[0] == 1 and attn_mask.ndim == 3:
                 attn_mask = attn_mask.unsqueeze(0)
             else:
                 attn_mask = attn_mask.view(bsz, num_heads, -1, src_len)
@@ -689,11 +1020,184 @@ def multi_head_attention_forward(
         v = v.view(bsz, num_heads, src_len, head_dim)
 
         attn_output = scaled_dot_product_attention(q, k, v, attn_mask, dropout_p, is_causal)
-        attn_output = attn_output.permute(2, 0, 1, 3).contiguous().view(bsz * tgt_len, embed_dim)
+        attn_output = attn_output.permute(2, 0, 1, 3).view(bsz * tgt_len, embed_dim)
 
         attn_output = linear(attn_output, out_proj_weight, out_proj_bias)
-        attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+        attn_output = attn_output.view(tgt_len, bsz, attn_output.shape[1])
         if not is_batched:
             # squeeze the output if input was unbatched
             attn_output = attn_output.squeeze(1)
         return attn_output, None
+
+def _canonical_mask(
+        mask: Optional[mindtorch.Tensor],
+        mask_name: str,
+        other_type: Optional[int],
+        other_name: str,
+        target_type: int,
+        check_other: bool = True,
+) -> Optional[mindtorch.Tensor]:
+    if mask is not None:
+        _mask_dtype = mask.dtype
+        _mask_is_float = ops.is_floating_point(mask)
+        if _mask_dtype != mindspore.bool_ and not _mask_is_float:
+            raise AssertionError(
+                f"only bool and floating types of {mask_name} are supported")
+        if check_other and other_type is not None:
+            if _mask_dtype != other_type:
+                warnings.warn(
+                    f"Support for mismatched {mask_name} and {other_name} "
+                    "is deprecated. Use same type for both instead."
+                )
+        if not _mask_is_float:
+            zero_tensor = ops.zeros_like(mask, dtype=target_type)
+            mask = ops.where(mask, mindtorch.Tensor(float("-inf"), target_type), zero_tensor)
+            # mask = (
+            #     ops.zeros_like(mask, dtype=target_type)
+            #     .masked_fill_(mask, float("-inf"))
+            # )
+    return mask
+
+def _none_or_dtype(input: Optional[mindtorch.Tensor]) -> Optional[int]:
+    if input is None:
+        return None
+    elif isinstance(input, mindtorch.Tensor):
+        return input.dtype
+    raise RuntimeError("input to _none_or_dtype() must be None or mindtorch.Tensor")
+
+def unfold(input, kernel_size, dilation=1, padding=0, stride=1):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.unfold(input, kernel_size, dilation, padding, stride)
+    return ops.unfold(input, kernel_size, dilation, padding, stride)
+
+def fold(input, output_size, kernel_size, dilation=1, padding=0, stride=1):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.fold(input, output_size, kernel_size, dilation, padding, stride)
+    return ops.fold(input, output_size, kernel_size, dilation, padding, stride)
+
+def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+    pad_mode = 'pad'
+    pad = padding
+    if isinstance(padding, tuple):
+        pad = (0, 0, padding[0], padding[0])
+    elif isinstance(padding, int):
+        pad = (0, 0) + (padding,) * 2
+    if not isinstance(padding, (int, tuple)):
+        pad_mode = padding
+        pad = (0,) * 4
+
+    _conv2d = _get_cache_prim(ops.Conv2D)(out_channel=weight.shape[0] * groups,
+                                        kernel_size=(1, weight.shape[-1]),
+                                        mode=1,
+                                        pad_mode=pad_mode,
+                                        pad=pad,
+                                        stride=(1, stride),
+                                        dilation=(1, dilation),
+                                        group=groups)
+
+    input = input.expand_dims(2)
+    output = _conv2d(input, weight.expand_dims(2))
+
+    if bias is not None:
+        output = ops.bias_add(output, bias)
+
+    output = output.squeeze(2)
+    return output
+
+def ctc_loss(log_probs, targets, input_lengths, target_lengths, blank=0, reduction='mean', zero_infinity=False):
+    ctc_loss_op = _get_cache_prim(nn_ops.CTCLossV2)(blank=blank, reduction="none", zero_infinity=zero_infinity)
+    loss, _ = ctc_loss_op(log_probs, targets, input_lengths, target_lengths)
+    if zero_infinity:
+        loss = ops.where(ops.isinf(loss), 0., loss)
+    if reduction == 'sum':
+        loss = loss.sum()
+    if reduction == 'mean':
+        input_type = loss.dtype
+        target_length_t = target_lengths.clip(1., None)
+        loss = loss.astype("float32")
+        loss = loss / target_length_t
+        loss = loss.mean()
+        loss = loss.astype(input_type)
+    return loss
+
+def one_hot(tensor, num_classes=-1):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.one_hot(tensor, num_classes)
+    return ops.one_hot(tensor, num_classes)
+
+def pixel_shuffle(input, upscale_factor):
+    return ops.pixel_shuffle(input, upscale_factor)
+
+def pixel_unshuffle(input, downscale_factor):
+    return ops.pixel_shuffle(input, downscale_factor)
+
+def grid_sample(input, grid, mode='bilinear', padding_mode='zeros', align_corners=False):
+    if use_pyboost():
+        return mindspore.mint.nn.functional.grid_sample(input, grid, mode, padding_mode, align_corners)
+    return ops.grid_sample(input, grid, mode, padding_mode, align_corners)
+
+def cosine_similarity(x1, x2, dim=1, eps=1e-8):
+    if DEVICE_TARGET == 'Ascend':
+        zero_norm_mask = ((x1.sum(dim) == 0).int() & (x2.sum(dim) == 0).int()).bool()
+    else:
+        zero_norm_mask = (x1.sum(dim) == 0) & (x2.sum(dim) == 0)
+
+    cosine_sim = ops.cosine_similarity(x1, x2, dim, eps)
+    return ops.select(zero_norm_mask, ops.ones_like(cosine_sim), cosine_sim)
+
+# def pairwise_distance():
+#     return ops.pairwise_distance
+
+def make_attention_mask(
+    query_input: mindtorch.Tensor,
+    key_input: mindtorch.Tensor,
+    dtype=mindtorch.float32,
+):
+    """Mask-making helper for attention weights.
+
+    In case of 1d inputs (i.e., `[batch..., len_q]`, `[batch..., len_kv]`, the
+    attention weights will be `[batch..., heads, len_q, len_kv]` and this
+    function will produce `[batch..., 1, len_q, len_kv]`.
+
+    Args:
+      query_input: a batched, flat input of query_length size
+      key_input: a batched, flat input of key_length size
+      dtype: mask return dtype
+
+    Returns:
+      A `[batch..., 1, len_q, len_kv]` shaped mask for 1d attention.
+    """
+    mask = ops.greater_equal(
+        ops.expand_dims(query_input, axis=-1), ops.expand_dims(key_input, axis=-2)
+    )
+    mask = ops.expand_dims(mask, axis=-3)
+    return mask.astype(dtype)
+
+
+def make_causal_mask(
+    x: mindtorch.Tensor, dtype=mindtorch.float32
+) -> mindtorch.Tensor:
+    """Make a causal mask for self-attention.
+
+    In case of 1d inputs (i.e., `[batch..., len]`, the self-attention weights
+    will be `[batch..., heads, len, len]` and this function will produce a
+    causal mask of shape `[batch..., 1, len, len]`.
+
+    Args:
+      x: input array of shape `[batch..., len]`
+      extra_batch_dims: number of batch dims to add singleton axes for, none by
+        default
+      dtype: mask return dtype
+
+    Returns:
+      A `[batch..., 1, len, len]` shaped causal mask for 1d attention.
+    """
+    idxs = ops.broadcast_to(ops.arange(x.shape[-1], dtype=mindspore.int32), x.shape)
+    return make_attention_mask(
+        idxs,
+        idxs,
+        dtype=dtype,
+    )
+
+def rotary_position_embedding(x, cos, sin, mode=0):
+    return execute('rotary_position_embedding', x, cos, sin, mode)
