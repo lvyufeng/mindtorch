@@ -1,4 +1,4 @@
-pip uninstall torch torch_npu torchvision -y
+pip uninstall torch torch_npu -y
 
 rm -rf ./build
 rm -rf ./dist
