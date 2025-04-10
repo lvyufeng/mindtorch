@@ -5,6 +5,11 @@ from mindspore._c_expression.typing import Type
 
 dtype = Type
 
+def is_floating_point(self):
+    return isinstance(self, typing.Float)
+
+Type.is_floating_point = is_floating_point
+
 # type definition
 bool = typing.kBool
 
@@ -42,6 +47,8 @@ long = int64
 int = int32
 cfloat = complex64
 cdouble = complex128
+float8_e4m3fn = None
+float8_e5m2 = None
 
 np2dtype = {
     np.bool_: bool,

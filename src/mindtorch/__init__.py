@@ -72,8 +72,17 @@ from ._C.size import Size
 from .types import device
 from .ops import *
 from mindtorch.amp import autocast, GradScaler
-from mindtorch import amp as amp, random as random, serialization as serialization, utils as utils, \
-    jit as jit
+from mindtorch import (
+    __future__ as __future__,
+    amp as amp,
+    random as random,
+    serialization as serialization,
+    utils as utils,
+    jit as jit,
+    fx as fx,
+    compiler as compiler,
+    overrides as overrides,
+)
 from mindtorch.random import get_rng_state, initial_seed, manual_seed, seed, set_rng_state
 from mindtorch.serialization import load, save
 from . import optim, ops, nn, distributions, cuda, npu, distributed#, multiprocessing

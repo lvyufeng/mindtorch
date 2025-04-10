@@ -554,6 +554,79 @@ class Module:
             raise KeyError("attribute '{}' already exists".format(name))
         self._modules[name] = module
 
+    def get_parameter(self, target: str) -> "Parameter":
+        """Return the parameter given by ``target`` if it exists, otherwise throw an error.
+
+        See the docstring for ``get_submodule`` for a more detailed
+        explanation of this method's functionality as well as how to
+        correctly specify ``target``.
+
+        Args:
+            target: The fully-qualified string name of the Parameter
+                to look for. (See ``get_submodule`` for how to specify a
+                fully-qualified string.)
+
+        Returns:
+            torch.nn.Parameter: The Parameter referenced by ``target``
+
+        Raises:
+            AttributeError: If the target string references an invalid
+                path or resolves to something that is not an
+                ``nn.Parameter``
+        """
+        module_path, _, param_name = target.rpartition(".")
+
+        mod: mindtorch.nn.Module = self.get_submodule(module_path)
+
+        if not hasattr(mod, param_name):
+            raise AttributeError(
+                mod._get_name() + " has no attribute `" + param_name + "`"
+            )
+
+        param: mindtorch.nn.Parameter = getattr(mod, param_name)
+
+        if not isinstance(param, mindtorch.nn.Parameter):
+            raise AttributeError("`" + param_name + "` is not an nn.Parameter")
+
+        return param
+
+    def get_buffer(self, target: str) -> "Tensor":
+        """Return the buffer given by ``target`` if it exists, otherwise throw an error.
+
+        See the docstring for ``get_submodule`` for a more detailed
+        explanation of this method's functionality as well as how to
+        correctly specify ``target``.
+
+        Args:
+            target: The fully-qualified string name of the buffer
+                to look for. (See ``get_submodule`` for how to specify a
+                fully-qualified string.)
+
+        Returns:
+            torch.Tensor: The buffer referenced by ``target``
+
+        Raises:
+            AttributeError: If the target string references an invalid
+                path or resolves to something that is not a
+                buffer
+        """
+        module_path, _, buffer_name = target.rpartition(".")
+
+        mod: mindtorch.nn.Module = self.get_submodule(module_path)
+
+        if not hasattr(mod, buffer_name):
+            raise AttributeError(
+                mod._get_name() + " has no attribute `" + buffer_name + "`"
+            )
+
+        buffer: mindtorch.Tensor = getattr(mod, buffer_name)
+
+        if buffer_name not in mod._buffers:
+            raise AttributeError("`" + buffer_name + "` is not a buffer")
+
+        return buffer
+
+
     def get_extra_state(self) -> Any:
         """Return any extra state to include in the module's state_dict.
 
@@ -1047,12 +1120,20 @@ class Module:
     def npu(self: T, device: Optional[Union[int, device]] = None) -> T:
         return self._apply(lambda t: t.npu(device))
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
         r"""Copy parameters and buffers from :attr:`state_dict` into only this module, but not its descendants.
 
         This is called on every submodule
-        in :meth:`~nn.Module.load_state_dict`. Metadata saved for this
+        in :meth:`~torch.nn.Module.load_state_dict`. Metadata saved for this
         module in input :attr:`state_dict` is provided as :attr:`local_metadata`.
         For state dicts without metadata, :attr:`local_metadata` is empty.
         Subclasses can achieve class-specific backward compatible loading using
@@ -1063,7 +1144,7 @@ class Module:
 
         .. note::
             :attr:`state_dict` is not the same object as the input
-            :attr:`state_dict` to :meth:`~nn.Module.load_state_dict`. So
+            :attr:`state_dict` to :meth:`~torch.nn.Module.load_state_dict`. So
             it can be modified.
 
         Args:
@@ -1082,64 +1163,126 @@ class Module:
                 keys to this list
             error_msgs (list of str): error messages should be added to this
                 list, and will be reported together in
-                :meth:`~nn.Module.load_state_dict`
+                :meth:`~torch.nn.Module.load_state_dict`
         """
         for hook in self._load_state_dict_pre_hooks.values():
-            hook(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+            hook(
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
 
-        persistent_buffers = {k: v for k, v in self._buffers.items() if k not in self._non_persistent_buffers_set}
-        local_name_params = itertools.chain(self._parameters.items(), persistent_buffers.items())
+        persistent_buffers = {
+            k: v
+            for k, v in self._buffers.items()
+            if k not in self._non_persistent_buffers_set
+        }
+        local_name_params = itertools.chain(
+            self._parameters.items(), persistent_buffers.items()
+        )
         local_state = {k: v for k, v in local_name_params if v is not None}
         assign_to_params_buffers = local_metadata.get("assign_to_params_buffers", False)
+        use_swap_tensors = mindtorch.__future__.get_swap_module_params_on_conversion()
 
         for name, param in local_state.items():
             key = prefix + name
             if key in state_dict:
                 input_param = state_dict[key]
-                if not isinstance(input_param, Tensor):
-                    error_msgs.append(f'While copying the parameter named "{key}", '
-                                      'expected mindtorch.Tensor or Tensor-like object from checkpoint but '
-                                      f'received {type(input_param)}'
-                                      )
+                if not mindtorch.overrides.is_tensor_like(input_param):
+                    error_msgs.append(
+                        f'While copying the parameter named "{key}", '
+                        "expected torch.Tensor or Tensor-like object from checkpoint but "
+                        f"received {type(input_param)}"
+                    )
                     continue
 
                 # This is used to avoid copying uninitialized parameters into
                 # non-lazy modules, since they dont have the hook to do the checks
                 # in such case, it will error when accessing the .shape attribute.
+                is_param_lazy = mindtorch.nn.parameter.is_lazy(param)
+                # Backward compatibility: loading 1-dim tensor from 0.3.* to version 0.4+
+                if (
+                    not is_param_lazy
+                    and len(param.shape) == 0
+                    and len(input_param.shape) == 1
+                ):
+                    input_param = input_param[0]
 
-                if input_param.shape != param.shape:
+                if not is_param_lazy and input_param.shape != param.shape:
                     # local shape should match the one in checkpoint
-                    error_msgs.append(f'size mismatch for {key}: copying a param with shape {input_param.shape} from checkpoint, '
-                                      f'the shape in current model is {param.shape}.')
+                    error_msgs.append(
+                        f"size mismatch for {key}: copying a param with shape {input_param.shape} from checkpoint, "
+                        f"the shape in current model is {param.shape}."
+                    )
                     continue
 
+                if (
+                    param.is_meta
+                    and not input_param.is_meta
+                    and not assign_to_params_buffers
+                ):
+                    warnings.warn(
+                        f"for {key}: copying from a non-meta parameter in the checkpoint to a meta "
+                        "parameter in the current model, which is a no-op. (Did you mean to "
+                        "pass `assign=True` to assign items in the state dictionary to their "
+                        "corresponding key in the module instead of copying them in place?)"
+                    )
 
                 try:
-                    if assign_to_params_buffers:
-                        # Shape checks are already done above
-                        if isinstance(param, mindtorch.nn.Parameter):
-                            if not isinstance(input_param, mindtorch.nn.Parameter):
-                                input_param = mindtorch.nn.Parameter(
-                                    input_param, requires_grad=param.requires_grad
+                    with mindtorch.no_grad():
+                        if use_swap_tensors:
+                            new_input_param = param.module_load(
+                                input_param, assign=assign_to_params_buffers
+                            )
+                            if id(new_input_param) == id(input_param) or id(
+                                new_input_param
+                            ) == id(param):
+                                raise RuntimeError(
+                                    "module_load returned one of self or other, please .detach() "
+                                    "the result if returning one of the inputs in module_load"
                                 )
-                            else:
-                                input_param.requires_grad_(param.requires_grad)
-
-                        setattr(self, name, input_param)
-                    else:
-                        param.copy_(input_param)
+                            if isinstance(param, mindtorch.nn.Parameter):
+                                if not isinstance(new_input_param, mindtorch.nn.Parameter):
+                                    new_input_param = mindtorch.nn.Parameter(
+                                        new_input_param,
+                                        requires_grad=param.requires_grad,
+                                    )
+                                else:
+                                    new_input_param.requires_grad_(param.requires_grad)
+                            mindtorch.utils.swap_tensors(param, new_input_param)
+                            del new_input_param
+                        elif assign_to_params_buffers:
+                            # Shape checks are already done above
+                            if isinstance(param, mindtorch.nn.Parameter):
+                                if not isinstance(input_param, mindtorch.nn.Parameter):
+                                    input_param = mindtorch.nn.Parameter(
+                                        input_param, requires_grad=param.requires_grad
+                                    )
+                                else:
+                                    input_param.requires_grad_(param.requires_grad)
+                            setattr(self, name, input_param)
+                        else:
+                            param.copy_(input_param)
                 except Exception as ex:
-                    action = "copying"
-                    error_msgs.append(f'While {action} the parameter named "{key}", '
-                                      f'whose dimensions in the model are {param.shape} and '
-                                      f'whose dimensions in the checkpoint are {input_param.shape}, '
-                                      f'an exception occurred : {ex.args}.'
-                                      )
+                    action = "swapping" if use_swap_tensors else "copying"
+                    error_msgs.append(
+                        f'While {action} the parameter named "{key}", '
+                        f"whose dimensions in the model are {param.size()} and "
+                        f"whose dimensions in the checkpoint are {input_param.size()}, "
+                        f"an exception occurred : {ex.args}."
+                    )
             elif strict:
                 missing_keys.append(key)
 
         extra_state_key = prefix + _EXTRA_STATE_KEY_SUFFIX
-        if getattr(self.__class__, "set_extra_state", Module.set_extra_state) is not Module.set_extra_state:
+        if (
+            getattr(self.__class__, "set_extra_state", Module.set_extra_state)
+            is not Module.set_extra_state
+        ):
             if extra_state_key in state_dict:
                 self.set_extra_state(state_dict[extra_state_key])
             elif strict:
@@ -1150,7 +1293,7 @@ class Module:
         if strict:
             for key in state_dict.keys():
                 if key.startswith(prefix) and key != extra_state_key:
-                    input_name = key[len(prefix):].split(".", 1)
+                    input_name = key[len(prefix) :].split(".", 1)
                     # Must be Module if it have attributes
                     if len(input_name) > 1:
                         if input_name[0] not in self._modules:

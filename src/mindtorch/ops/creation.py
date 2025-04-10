@@ -152,7 +152,9 @@ def eye(n, m=None, *, out=None, dtype=None, layout=None, device=None, requires_g
     return out
 
 # empty
-def empty(*size, out=None, dtype=None, layout=None, device=None, requires_grad=False, pin_memory=False, memory_format=None):
+def empty(*shape, size=None, out=None, dtype=None, layout=None, device=None, requires_grad=False, pin_memory=False, memory_format=None):
+    if size is None:
+        size = shape
     if dtype is None:
         dtype = get_default_dtype()
     if device is None:
@@ -160,7 +162,9 @@ def empty(*size, out=None, dtype=None, layout=None, device=None, requires_grad=F
     if isinstance(size[0], (tuple, list)):
         size = size[0]
 
-    output = execute('empty', size, dtype, device=device, requires_grad=requires_grad, user_created=True)
+    if device == 'meta' or device.type == 'meta':
+        return mindtorch.Tensor(*size, dtype=dtype, device=device, requires_grad=requires_grad)
+    output = execute('empty', tuple(size), dtype, device=device, requires_grad=requires_grad, user_created=True)
     if out is None:
         return output
     out.data = output

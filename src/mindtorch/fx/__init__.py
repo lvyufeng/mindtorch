@@ -7,3 +7,5 @@ from mindtorch.fx._symbolic_trace import (  # noqa: F401
 )
 
 from mindtorch.fx.proxy import Proxy
+
+from . import _pytree

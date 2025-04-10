@@ -43,8 +43,11 @@ class TensorMeta(type):
         result = super().__instancecheck__(instance)
         if result:
             return result
-        if self == Tensor and type(instance) == mindtorch.nn.Parameter:
-            return True
+        if self is mindtorch.nn.Parameter:
+            if isinstance(instance, mindtorch.Tensor) and getattr(
+                instance, "_is_param", False
+            ):
+                return True
         dtype = getattr(instance, 'dtype', None)
         if dtype is not None and dtype in dtype_class_map:
             return self == dtype_class_map[instance.dtype]
@@ -59,12 +62,16 @@ class Tensor(metaclass=TensorMeta):
     _user_created = False
     _requires_grad = False
     _retain_grad = False
+    _is_param: bool
 
-    def __init__(self, *input, device=None, dtype=None, requires_grad=False): # pylint: disable=super-init-not-called
+    def __init__(self, *input, device=None, dtype=None, requires_grad=False, **kwargs): # pylint: disable=super-init-not-called
         if hasattr(self, '_is_param') and self._is_param:
             return
         if device is None:
             device = device_('cpu')
+        if isinstance(device, str):
+            device = device_(device)
+
         self.device = device
 
         if isinstance(input[0], TensorNode):
@@ -250,12 +257,7 @@ class Tensor(metaclass=TensorMeta):
 
     def __getitem__(self, slices):
         if self.device.type == 'cpu':
-            if isinstance(slices, Tensor):
-                data = self.numpy()[slices.numpy()]
-            else:
-                data = self.numpy()[slices]
-            
-            return Tensor(MSTensor(np.array(data)), device=self.device)
+            return mindtorch.getitem(self, slices)
         return mindtorch.tensor_getitem(self, slices)
 
     def __setitem__(self, slices, value):
@@ -1280,6 +1282,10 @@ class Tensor(metaclass=TensorMeta):
             return True
         return False
 
+    @property
+    def is_meta(self):
+        return self.device.type == 'meta'
+
     # Tensor.is_pinned
 
 
@@ -2103,6 +2109,8 @@ class Tensor(metaclass=TensorMeta):
     def _move_to(self, device, non_blocking=False):
         if self.device == device:
             return self
+        elif device.type == 'meta':
+            return Tensor(MSTensor(shape=self.shape, dtype=self.dtype), device=device)
         else:
             if device.type == 'cpu':
                 MEMCPY = 2

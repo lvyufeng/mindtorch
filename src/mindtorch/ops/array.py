@@ -386,6 +386,9 @@ def tensor_getitem(self, index):
 
 def tensor_setitem(self, index, value):
     """Handle tensor setitem"""
+    if self.device.type == 'meta':
+        return self
+
     if not isinstance(value, mindtorch.Tensor):
         if isinstance(value, (bool, int, float)):
             value = mindtorch.tensor(value, dtype=self.dtype, device=self.device)

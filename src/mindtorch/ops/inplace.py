@@ -21,9 +21,10 @@ def inplace_zero(input):
     device = input.device
     if input.device == 'npu':
         execute('inplace_zero', input)
-    else:
+    elif input.device.type == 'cpu':
         out = execute('zeros', input.shape, input.dtype, device=device)
         input.data = out
+    return input
 
 def inplace_fill(input, value):
     device = input.device
@@ -31,10 +32,10 @@ def inplace_fill(input, value):
         if isinstance(value, (int, float, bool)):
             execute('inplace_fill_scalar', input, value)
         execute('inplace_fill_tensor', input, value)
-    else:
+    elif input.device.type == 'cpu':
         out = execute('full', input.shape, value, device=device)
         input.data = out
-
+    return input
 
 def inplace_normal(input, mean=0, std=1, *, generator=None):
     if generator is None:
@@ -42,9 +43,9 @@ def inplace_normal(input, mean=0, std=1, *, generator=None):
     seed, offset = generator._step(generator_step_)
     if input.device.type == 'npu':
         execute('inplace_normal', input, mean, std, seed, offset)
-    else:
+    elif input.device.type == 'cpu':
         mindtorch.normal(mean, std, size=input.size, generator=generator, out=input)
-    
+
     return input
 
 # uniform_
