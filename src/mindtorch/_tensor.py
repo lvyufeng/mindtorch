@@ -2357,7 +2357,14 @@ class Tensor(metaclass=TensorMeta):
 
 
     # Tensor.view
-    def view(self, *shape):
+    def view(self, *args, **kwargs):
+        if args and isinstance(args[0], mindtorch.dtype):
+            dtype = args[0]
+        else:
+            dtype = kwargs.get('dtype', None)
+        if dtype is not None:
+            return mindtorch._bind.view(self, dtype)
+        shape = args
         return self.reshape(*shape)
 
     # Tensor.view_as
@@ -2408,10 +2415,9 @@ def tensor(data, *, dtype=None, device=None, requires_grad=False):
     if device is None:
         device = mindtorch.get_default_device()
 
-    if dtype is None:
-        dtype = mindtorch.get_default_dtype()
-
-    data_np = np.array(data, dtype=mindtorch._dtype.dtype2np[dtype], order='C') # must be C for mindspore Tensor
+    data_np = np.array(data, order='C') # must be C for mindspore Tensor
+    if dtype is not None:
+        data_np = data_np.astype(mindtorch._dtype.dtype2np[dtype])
     data_tensor = MSTensor.from_numpy(data_np) # shared memory
     mindtorch._utils.set_device_address(data_tensor)
 

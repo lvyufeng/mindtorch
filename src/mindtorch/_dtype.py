@@ -9,6 +9,7 @@ def is_floating_point(self):
     return isinstance(self, typing.Float)
 
 Type.is_floating_point = is_floating_point
+Type.__str__ = Type.__repr__
 
 # type definition
 bool = typing.kBool

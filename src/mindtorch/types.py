@@ -110,3 +110,7 @@ class Storage:
         element_size: int,
     ) -> "Storage":
         raise NotImplementedError
+
+_device = device
+_dtype = dtype
+_size = tuple

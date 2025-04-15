@@ -88,9 +88,16 @@ from mindtorch.random import get_rng_state, initial_seed, manual_seed, seed, set
 from mindtorch.serialization import load, save
 from . import optim, ops, nn, distributions, cuda, npu, distributed#, multiprocessing
 from .autograd import no_grad, enable_grad, value_and_grad, inference_mode
-from ._bind import get_default_dtype, set_default_dtype, set_default_device, get_default_device, finfo
 from .storage import TypedStorage, UntypedStorage, Storage
 from ._lowrank import svd_lowrank
+from ._bind import (
+    get_default_dtype,
+    set_default_dtype,
+    set_default_device,
+    get_default_device,
+    finfo,
+    asarray
+)
 
 AUTO_CAST_DTYE = {
     'cuda': bfloat16,

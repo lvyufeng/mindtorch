@@ -460,16 +460,9 @@ def _share_memory_lock_protected(fn):
 
 
 class UntypedStorage(_StorageBase):
-    def __init__(self, data_ptr, nbytes, device, dtype):
+    def __init__(self, data, device=None):
+        self.data = data # np array as storage
         self.device = device
-        self.dtype = dtype
-        self._data_ptr = data_ptr
-        self._nbytes = nbytes
-
-    def __getitem__(self, *args, **kwargs):
-        if self.device.type == "meta":
-            raise NotImplementedError("Not available for 'meta' device type")
-        return super().__getitem__(*args, **kwargs)
 
     @property
     def is_cuda(self):
@@ -532,10 +525,21 @@ class UntypedStorage(_StorageBase):
         return super()._share_filename_cpu_(*args, **kwargs)
 
     def data_ptr(self):
-        return self._data_ptr
+        return self.data.ctypes.data
 
     def nbytes(self):
-        return self._nbytes
+        return self.data.nbytes
+
+    @classmethod
+    def from_file(cls, filename, shared, nbytes):
+        data = np.memmap(filename)
+        return cls(data, device=mindtorch.device('cpu'))
+
+    def __getitem__(self, slice):
+        if self.device.type == "meta":
+            raise NotImplementedError("Not available for 'meta' device type")
+
+        return UntypedStorage(self.data[slice])
 
 def _load_from_bytes(b):
     return mindtorch.load(io.BytesIO(b), weights_only=False)
@@ -982,6 +986,7 @@ class TypedStorage:
         return self._getitem(idx)
 
     def _getitem(self, idx):
+        print(idx)
         if self._untyped_storage.device.type == "meta":
             raise NotImplementedError("Not available for 'meta' device type")
 

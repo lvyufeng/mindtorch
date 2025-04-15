@@ -1,6 +1,10 @@
+import ctypes
+from typing import Any
 from ._dtype import *
 from .configs import DEFAULT_DTYPE, DEFAULT_DEVICE
 from .types import device as device_
+
+import mindtorch
 
 AUTO_CAST_DTYE = {
     'cuda': float16,
@@ -130,3 +134,19 @@ class finfo:
     @property
     def dtype(self):
         return str(self._dtype)
+
+def asarray(obj: Any, *, dtype, device=None, copy = None, requires_grad = False):
+    data = obj.data.view(mindtorch.dtype2np[dtype])
+    out = mindtorch.Tensor(data)
+    mindtorch._utils.set_device_address(out)
+    return out
+
+def view(self, dtype):
+    data_ptr = self.data_ptr()
+    nbytes = self.nbytes
+    data = np.ctypeslib.as_array((ctypes.c_byte * nbytes).from_address(data_ptr), shape=(nbytes,))
+    data = data.view(mindtorch.dtype2np[dtype])
+    assert data_ptr == data.ctypes.data
+    out = mindtorch.Tensor(data)
+    mindtorch._utils.set_device_address(out)
+    return out

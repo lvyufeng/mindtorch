@@ -23,3 +23,5 @@ def _debug_set_autodiff_subgraph_inlining(mode):
 
 Graph = None
 Value = None
+
+DisableTorchFunctionSubclass = None
